@@ -1,0 +1,50 @@
+Roadway Design Compiler
+Copyright 2026 Dhyaneswar
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+---
+
+ENGINEERING STANDARDS
+
+This software computes geometric design criteria from published engineering
+relationships. It does NOT reproduce, embed or redistribute any table, figure or
+text from the AASHTO "A Policy on Geometric Design of Highways and Streets"
+(the Green Book) or from any other copyrighted standard.
+
+Every coefficient the relationships require -- side friction factor, driver
+perception-reaction time, deceleration rate, driver eye height, object height,
+maximum relative gradient, maximum grade -- is a runtime INPUT with a documented
+default. The defaults shipped here are illustrative values used to make the tool
+runnable. They are NOT an adopted agency standard, and this software makes no
+claim that they are. An engineer or agency applying this tool supplies the
+criteria their jurisdiction has adopted.
+
+---
+
+DISCLAIMER
+
+This is conceptual design tooling. It is NOT for construction.
+
+Every design produced with it requires review and sealing by a licensed
+Professional Engineer, who carries sole professional and legal responsibility for
+the work. No output of this software constitutes an engineering deliverable until
+a licensed engineer has reviewed and sealed it.
+
+---
+
+THIRD-PARTY
+
+three.js -- MIT License -- https://github.com/mrdoob/three.js
+zod (dev) -- MIT License -- https://github.com/colinhacks/zod
+vite, vitest, typescript (dev) -- MIT License

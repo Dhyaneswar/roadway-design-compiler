@@ -1,0 +1,6 @@
+# Normalise line endings so a fresh clone on any platform gets the same bytes.
+# Without this, text files check out CRLF on Windows and every content hash a
+# reviewer computes differs from the one recorded here.
+* text=auto eol=lf
+*.png binary
+*.cmd text eol=crlf

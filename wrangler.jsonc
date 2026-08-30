@@ -1,0 +1,13 @@
+{
+  // Static-asset Worker for the Roadway Design Compiler.
+  //
+  // No "main": there is no Worker script, Cloudflare serves studio/dist directly.
+  // WebMCP requires a SECURE CONTEXT, which the workers.dev HTTPS origin provides.
+  //
+  // Build first:  npx vite build studio
+  "name": "roadway-design-compiler",
+  "compatibility_date": "2026-08-30",
+  "assets": {
+    "directory": "./studio/dist"
+  }
+}
