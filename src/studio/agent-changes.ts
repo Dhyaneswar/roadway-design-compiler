@@ -22,6 +22,11 @@ export interface AgentChange {
   readonly at: string;
   /** Whether a human has confirmed it. */
   confirmed: boolean;
+  /**
+   * The design as it stood BEFORE this change, so it can be undone. Opaque here
+   * on purpose: the ledger is about authority, not about roadway geometry.
+   */
+  readonly before?: unknown;
 }
 
 export class AgentChangeLedger {
@@ -29,15 +34,40 @@ export class AgentChangeLedger {
   private nextId = 1;
 
   /** Record an agent-authored change as pending confirmation. */
-  record(description: string, now: Date = new Date()): AgentChange {
+  record(description: string, before?: unknown, now: Date = new Date()): AgentChange {
     const change: AgentChange = {
       id: this.nextId++,
       description,
       at: now.toISOString(),
       confirmed: false,
+      before,
     };
     this.changes.push(change);
     return change;
+  }
+
+  /** The most recent change, confirmed or not. */
+  last(): AgentChange | undefined {
+    return this.changes[this.changes.length - 1];
+  }
+
+  /**
+   * Remove the most recent change and hand back the design that preceded it.
+   *
+   * ⛔ Refuses when the last change has been CONFIRMED. Once a licensed engineer
+   * has accepted work, an agent silently reverting it would undo something a
+   * person has already stood behind. The agent must author a new, visible change
+   * instead -- which lands in this ledger and needs its own confirmation.
+   */
+  undoLast():
+    | { ok: true; change: AgentChange; before: unknown }
+    | { ok: false; reason: "nothing-to-undo" | "last-change-confirmed"; change?: AgentChange } {
+    const change = this.last();
+    if (!change) return { ok: false, reason: "nothing-to-undo" };
+    if (change.confirmed) return { ok: false, reason: "last-change-confirmed", change };
+    if (change.before === undefined) return { ok: false, reason: "nothing-to-undo", change };
+    this.changes.pop();
+    return { ok: true, change, before: change.before };
   }
 
   all(): readonly AgentChange[] {

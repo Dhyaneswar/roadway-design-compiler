@@ -23,7 +23,7 @@ the agent do?"* — it is:
 This app draws that line and enforces it:
 
 - An agent can design an entire road — geometry, vertical profile, cross sections,
-  superelevation — through 21 WebMCP tools.
+  superelevation — through 24 WebMCP tools.
 - Every change it applies is stamped **agent-proposed** and held for confirmation.
 - **The LandXML deliverable is refused while anything is unconfirmed**, and there is
   deliberately **no tool that clears that**. Confirmation happens in the UI, by a person.
@@ -38,10 +38,12 @@ instead of hoped for in a system prompt.
 | | tools |
 |---|---|
 | **Read** | the design, alignment extents, curve table, profile table, a cross section at any station, superelevation transitions, unconfirmed changes, and `what_do_i_need` |
+| **Offer** | `propose_alternatives` — two to four complete designs, each costed and judged, for the engineer to choose between |
 | **Judge** | `check_design_criteria` — every curve, K value and grade against a design speed |
 | **Propose** | `propose_full_design` — a whole road from a description |
 | **Edit** | project setup, horizontal elements, PVIs, template segments and drops, superelevation |
-| **Deliver** | `export_landxml` — gated on human confirmation |
+| **Undo** | `undo_last_change` — reverts the agent's own unconfirmed work, and refuses once a human has confirmed it |
+| **Deliver** | `export_landxml` and `export_staking_csv` — both gated on human confirmation |
 
 Three things are deliberate:
 
@@ -67,6 +69,25 @@ agent: (computes 800 − 2×200 − margin = 380) set PVI 2 curve length 380 ft
 
 The agent is doing engineering arithmetic driven by a structured refusal. Nothing
 about that exchange is scripted.
+
+
+### Options, not answers
+
+A designer rarely wants *the* answer; they want two or three defensible options
+with the trade-offs computed. `propose_alternatives` lets an agent offer complete
+designs side by side — length, tightest radius, lowest K, and every criteria
+failure with the number that would fix it:
+
+```
+tight     2706.9 ft   min R  900   min K 181.00   2 of 4 FAIL
+          curve 2 radius 900 ft is 458.23 ft BELOW the 1358.23 ft minimum for 60 mph
+balanced  3413.7 ft   min R 1800   min K 214.57   1 of 4 FAIL
+gentle    4513.3 ft   min R 3200   min K 248.21   1 of 4 FAIL
+```
+
+⛔ **Nothing is applied, and there is no tool that adopts one.** Ranking these needs
+judgement about site, budget and right-of-way that a model does not have. A person
+clicks the option they want.
 
 ## Design criteria without redistributing a standard
 
@@ -94,7 +115,7 @@ gets its own answers. Every verdict reports the basis it used.
 
 ```bash
 npm install
-npm test               # 209 tests
+npm test               # 230 tests
 npm run studio         # http://localhost:5173
 npx vite build studio  # production build → studio/dist
 ```
@@ -116,7 +137,9 @@ node scripts/verify-webmcp.mjs          # tools, preview-does-not-mutate, refusa
 node scripts/verify-superelevation.mjs  # banking reaches the cross sections and the 3D view
 node scripts/verify-seal.mjs            # export refused until a human confirms
 node scripts/verify-parity.mjs          # a human can author everything an agent can
+node scripts/verify-new-tools.mjs       # undo, alternatives, and the staking gate
 node scripts/verify-live.mjs            # the whole story against the deployed URL
+node scripts/rehearse-video.mjs         # walks the demo beat by beat, screenshots each
 ```
 
 ## Architecture
@@ -125,8 +148,9 @@ node scripts/verify-live.mjs            # the whole story against the deployed U
 src/schema/      RoadDesign document + zod validation (cross-field rules live here)
 src/kernel/      horizontal · vertical · corridor · template-section · criteria ·
                  superelevation — pure, deterministic, golden-tested
-src/exporters/   LandXML 1.2, ORD-hardened
-src/studio/      WebMCP bridge · typed refusals · agent change ledger · activity log
+src/exporters/   LandXML 1.2 (ORD-hardened) and construction staking CSV
+src/studio/      WebMCP bridge · typed refusals · agent change ledger · activity log ·
+                 design alternatives
 studio/          the app: form, live tables, SVG plan+profile, 3D corridor (three.js)
 ```
 

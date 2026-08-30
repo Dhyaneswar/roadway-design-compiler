@@ -114,6 +114,36 @@
     #agentLog .k-error   { color: #ff8f7a; }
     #agentLog .k-preview { color: #7ab8ff; }
     #agentLog .k-read    { color: #8fa1b1; }
+  
+    /* human-facing staking control */
+    .stake-int { font-size: 12px; color: var(--dim); display: inline-flex;
+      align-items: center; gap: 5px; }
+    .stake-int input { width: 52px; padding: 4px 6px; }
+
+    /* alternatives the agent has offered -- only a person can adopt one */
+    #agentAlternatives { position: fixed; right: 16px; bottom: 16px; z-index: 9400;
+      width: min(520px, calc(100vw - 32px)); max-height: min(70vh, 640px); overflow-y: auto;
+      padding: 14px 16px; border-radius: 10px; border: 1px solid #2f5d7a;
+      background: #10202b; color: #d6e6f2; box-shadow: 0 14px 40px rgba(0,0,0,.55); }
+    #agentAlternatives .alt-close { position: absolute; top: 8px; right: 11px; border: 0;
+      background: transparent; color: #7d97a8; font-size: 20px; cursor: pointer; }
+    #agentAlternatives .alt-head { font-weight: 700; color: #8fd0ff; font-size: 14px;
+      margin-bottom: 3px; padding-right: 20px; }
+    #agentAlternatives .alt-sub { font-size: 12px; color: #8fa8b8; margin-bottom: 11px; }
+    #agentAlternatives .alt-list { display: grid; gap: 9px; }
+    #agentAlternatives .alt-card { border: 1px solid #24455c; border-radius: 7px;
+      padding: 10px 12px; background: #0b1922; }
+    #agentAlternatives .alt-card.alt-invalid { opacity: .6; border-style: dashed; }
+    #agentAlternatives .alt-label { font-weight: 700; color: #f2f8fc; font-size: 13px; }
+    #agentAlternatives .alt-why { font-size: 12px; color: #9fb6c6; margin: 3px 0 6px; }
+    #agentAlternatives .alt-facts { font-family: ui-monospace, monospace; font-size: 11.5px;
+      color: #cfe3f2; }
+    #agentAlternatives .alt-fails { margin: 6px 0 0; padding-left: 17px; font-size: 11.5px;
+      color: #e8b77a; }
+    #agentAlternatives .alt-adopt { margin-top: 9px; width: 100%; padding: 7px 12px; border: 0;
+      border-radius: 6px; background: #2f7fb8; color: #f2f8fc; font-size: 12.5px;
+      font-weight: 600; cursor: pointer; }
+    #agentAlternatives .alt-adopt:hover { background: #3a97d8; }
   </style>
 </head>
 <body>
@@ -201,6 +231,8 @@
       </div>
       <div class="actions">
         <button class="primary" id="download">Download LandXML for ORD</button>
+        <button id="downloadStaking">Download staking CSV</button>
+        <label class="stake-int">every <input id="stakeInterval" value="25" /> ft</label>
         <span id="status"></span>
       </div>
       <div class="errors" id="errors"></div>

@@ -6,9 +6,11 @@ import { sectionOffsets } from "../src/kernel/template-section";
 import { computeHorizontal } from "../src/kernel/horizontal";
 import { computeVertical } from "../src/kernel/vertical";
 import { toLandXML } from "../src/exporters/landxml";
+import { toStakingCsv } from "../src/exporters/staking";
 import { registerWebMcp } from "../src/studio/webmcp-bridge";
 import { AgentChangeLedger } from "../src/studio/agent-changes";
 import { AgentActivityLog, classifyResult } from "../src/studio/agent-activity";
+import { AlternativeSet, evaluateAlternatives, type AlternativeInput } from "../src/studio/alternatives";
 import { transitionFor } from "../src/kernel/superelevation";
 import { sampleAlignment, sampleProfile } from "../src/kernel/sample";
 import { azimuthToBearing, degreesToDms } from "../src/util/angle";
@@ -53,6 +55,9 @@ const agentLedger = new AgentChangeLedger();
 // Every WebMCP tool call, recorded from inside the tool surface. A filled log
 // is direct evidence the agent used our tools rather than driving the DOM.
 const agentLog = new AgentActivityLog();
+// Alternatives an agent has put on the table. Nothing here is applied until a
+// person picks one -- choosing between defensible options is the engineer's job.
+const alternatives = new AlternativeSet();
 
 function readForm(): StudioForm {
   return {
@@ -601,6 +606,28 @@ $("download").addEventListener("click", () => {
     // errors already shown by refresh()
   }
 });
+// Parity: the agent has export_staking_csv, so the engineer has this. A
+// deliverable reachable only through an agent would make the agent a gatekeeper.
+$("downloadStaking").addEventListener("click", () => {
+  try {
+    const design = formToDesign(readForm());
+    const raw = $<HTMLInputElement>("stakeInterval").value.trim();
+    const intervalFt = Number(raw === "" ? "25" : raw);
+    if (!Number.isFinite(intervalFt) || intervalFt <= 0) {
+      $("status").innerHTML = '<span class="err">staking interval must be a positive number</span>';
+      return;
+    }
+    const csv = toStakingCsv({ ...design, crs: readCrs() }, { intervalFt, includeOffsets: true });
+    const blob = new Blob([csv], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${design.name.replace(/[^\w\-]+/g, "_")}_staking_${intervalFt}ft.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch {
+    // errors already shown by refresh()
+  }
+});
 $("loadExample").addEventListener("click", () => {
   ($("name") as HTMLInputElement).value = "RDC-S1-SAMPLE";
   ($("beginStation") as HTMLInputElement).value = "1000";
@@ -643,6 +670,8 @@ $("loadExample").addEventListener("click", () => {
 
 /** Apply a whole form to the live studio: inputs, state, and a re-render. */
 function writeForm(next: StudioForm, agentChange?: string): void {
+  // Snapshot before anything changes: this is what undo_last_change restores.
+  const before = agentChange !== undefined ? snapshotForm() : undefined;
   $<HTMLInputElement>("name").value = next.name;
   $<HTMLInputElement>("beginStation").value = String(next.beginStation);
   $<HTMLInputElement>("startE").value = String(next.startE);
@@ -660,7 +689,7 @@ function writeForm(next: StudioForm, agentChange?: string): void {
   renderDrops();
   refresh();
   if (agentChange !== undefined) {
-    agentLedger.record(agentChange);
+    agentLedger.record(agentChange, before);
   }
   renderPendingBanner();
 }
@@ -712,6 +741,136 @@ function renderPendingBanner(): void {
   bar.append(head, sub, list, btn);
 }
 
+
+/** A deep copy of the current form, for the undo history. */
+function snapshotForm(): StudioForm {
+  return JSON.parse(JSON.stringify(readForm())) as StudioForm;
+}
+
+/** Restore a form without recording it as a new agent change. */
+function restoreForm(f: StudioForm): void {
+  $<HTMLInputElement>("name").value = f.name;
+  $<HTMLInputElement>("beginStation").value = String(f.beginStation);
+  $<HTMLInputElement>("startE").value = String(f.startE);
+  $<HTMLInputElement>("startN").value = String(f.startN);
+  $<HTMLInputElement>("azimuth").value = String(f.startAzimuthDeg);
+  elements = f.elements;
+  pvis = f.pvis;
+  templates = f.templates;
+  drops = f.drops;
+  superelevation = f.superelevation;
+  syncSupControls();
+  renderElements();
+  renderPvis();
+  renderTemplates();
+  renderDrops();
+  refresh();
+  renderPendingBanner();
+}
+
+/**
+ * The alternatives panel. An agent fills this; only a click applies anything.
+ * Adopting is recorded as a normal agent-proposed change, because the geometry
+ * came from the agent even though the choice came from the engineer.
+ */
+function renderAlternatives(): void {
+  let box = document.getElementById("agentAlternatives");
+  if (alternatives.count() === 0) { box?.remove(); return; }
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "agentAlternatives";
+    document.body.append(box);
+  }
+  box.innerHTML = "";
+
+  const head = document.createElement("div");
+  head.className = "alt-head";
+  head.textContent = alternatives.prompt || "Your agent has offered alternatives";
+
+  const sub = document.createElement("div");
+  sub.className = "alt-sub";
+  const speed = alternatives.designSpeedMph;
+  sub.textContent =
+    (speed !== undefined ? `Judged at ${speed} mph. ` : "") +
+    "Computed, not applied. Nothing changes until you pick one — the agent has no tool that can.";
+
+  const close = document.createElement("button");
+  close.className = "alt-close";
+  close.type = "button";
+  close.textContent = "\u00d7";
+  close.setAttribute("aria-label", "Dismiss alternatives");
+  close.addEventListener("click", () => { alternatives.clear(); renderAlternatives(); });
+
+  const list = document.createElement("div");
+  list.className = "alt-list";
+
+  alternatives.list().forEach((a, i) => {
+    const card = document.createElement("div");
+    card.className = "alt-card" + (a.refusal ? " alt-invalid" : "");
+
+    const label = document.createElement("div");
+    label.className = "alt-label";
+    label.textContent = a.label;
+
+    const why = document.createElement("div");
+    why.className = "alt-why";
+    why.textContent = a.rationale;
+
+    const facts = document.createElement("div");
+    facts.className = "alt-facts";
+    if (a.refusal) {
+      facts.textContent = "does not validate: " + a.refusal.code;
+    } else {
+      const bits = [
+        `${a.alignmentLengthFt} ft`,
+        `${a.curveCount} curve${a.curveCount === 1 ? "" : "s"}`,
+      ];
+      if (a.minRadiusFt !== undefined) bits.push(`min R ${a.minRadiusFt} ft`);
+      if (a.minK !== undefined) bits.push(`min K ${a.minK}`);
+      if (a.criteriaChecked !== undefined) {
+        bits.push(a.criteriaFailed === 0
+          ? `${a.criteriaChecked} checks, all pass`
+          : `${a.criteriaFailed} of ${a.criteriaChecked} FAIL`);
+      }
+      facts.textContent = bits.join("  ·  ");
+    }
+
+    card.append(label, why, facts);
+
+    if (a.failures && a.failures.length > 0) {
+      const fails = document.createElement("ul");
+      fails.className = "alt-fails";
+      for (const f of a.failures.slice(0, 3)) {
+        const li = document.createElement("li");
+        li.textContent = f.detail;
+        fails.append(li);
+      }
+      card.append(fails);
+    }
+
+    if (!a.refusal) {
+      const adopt = document.createElement("button");
+      adopt.className = "alt-adopt";
+      adopt.type = "button";
+      adopt.textContent = "Adopt this one";
+      adopt.addEventListener("click", () => {
+        const form = alternatives.formAt(i);
+        if (!form) return;
+        // Goes through writeForm, so it is stamped agent-proposed like any other
+        // agent-authored geometry. The engineer chose it; the agent produced it.
+        writeForm(form, `adopted alternative "${a.label}"`);
+        alternatives.clear();
+        renderAlternatives();
+        renderAgentLog();
+      });
+      card.append(adopt);
+    }
+    list.append(card);
+  });
+
+  box.append(close, head, sub, list);
+}
+
 const registeredTools = registerWebMcp({
   readForm,
   writeForm,
@@ -722,6 +881,19 @@ const registeredTools = registerWebMcp({
     const { kind, summary } = classifyResult(result);
     agentLog.record(tool, kind, summary);
     renderAgentLog();
+  },
+  undoLastAgentChange: () => {
+    const r = agentLedger.undoLast();
+    if (!r.ok) return { ok: false as const, reason: r.reason };
+    restoreForm(r.before as StudioForm);
+    renderAgentLog();
+    return { ok: true as const, description: r.change.description };
+  },
+  offerAlternatives: (question, alts: readonly AlternativeInput[], designSpeedMph, emax) => {
+    alternatives.offer(question, alts, evaluateAlternatives(alts, designSpeedMph, emax));
+    alternatives.designSpeedMph = designSpeedMph;
+    renderAlternatives();
+    return alts.length;
   },
 });
 

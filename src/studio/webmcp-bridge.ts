@@ -29,6 +29,8 @@ import { judgeCurveRadius, judgeGrade, judgeVerticalCurveK,
 import { transitionFor } from "../kernel/superelevation";
 import type { SuperelevationSpec } from "../schema/road-design";
 import { AiDesignProposal, proposalToForm } from "./ai-design";
+import { toStakingCsv, stakingRows } from "../exporters/staking";
+import { evaluateAlternatives, type AlternativeInput } from "./alternatives";
 import { isRefusal, tryBuild, type Refusal } from "./webmcp-refusals";
 
 export const AGENT_PROVENANCE = "agent-proposed; awaiting engineer confirmation";
@@ -77,6 +79,17 @@ export interface StudioHost {
   /** Called for EVERY tool invocation. This is what proves, from inside the
    *  tool surface, that an agent used WebMCP rather than driving the DOM. */
   onToolCall?(tool: string, result: unknown): void;
+  /** Undo the most recent agent change. The host owns the history. */
+  undoLastAgentChange(): { ok: true; description: string } | { ok: false; reason: string };
+  /** Put a set of alternatives in front of the engineer. Applies nothing.
+   *  The design speed goes through too: the engineer's panel must not show
+   *  LESS than the agent's own response did. */
+  offerAlternatives(
+    question: string,
+    alts: readonly AlternativeInput[],
+    designSpeedMph?: number,
+    emax?: number,
+  ): number;
   /** The selected coordinate reference system, so LandXML matches the app exactly. */
   readCrs(): unknown;
 }
@@ -201,6 +214,9 @@ const ANNOTATIONS: Readonly<Record<string, WebMcpToolAnnotations>> = {
   what_do_i_need: { title: "Ask what is wrong", readOnlyHint: true, idempotentHint: true },
   check_design_criteria: { title: "Judge against a design speed", readOnlyHint: true, idempotentHint: true },
   export_landxml: { title: "Export LandXML", readOnlyHint: true, idempotentHint: true },
+  export_staking_csv: { title: "Export staking CSV", readOnlyHint: true, idempotentHint: true },
+  propose_alternatives: { title: "Offer the engineer options", readOnlyHint: true, idempotentHint: true },
+  undo_last_change: { title: "Undo your last change", readOnlyHint: false, destructiveHint: false, idempotentHint: false },
 
   propose_full_design: { title: "Propose a whole road", readOnlyHint: false, destructiveHint: true, idempotentHint: true },
   set_project_setup: { title: "Set project setup", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
@@ -463,6 +479,155 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
           : "A person must confirm these in the Studio before LandXML can be produced.",
         authority: ["ADR: an agent can never be the confirming party"],
       };
+    },
+  );
+
+  add(
+    "undo_last_change",
+    "Undo the most recent change YOU made, restoring the design exactly as it was before it. " +
+      "\u26d4 This only works while the change is still unconfirmed. Once a licensed engineer has " +
+      "confirmed your work you cannot silently revert it -- that would undo something a person " +
+      "has already stood behind. Author a new, visible change instead, which lands in the ledger " +
+      "and needs its own confirmation.",
+    S.obj({}),
+    () => {
+      const r = host.undoLastAgentChange();
+      if (r.ok) {
+        return { undone: true, change: r.description,
+          pendingEngineerConfirmation: host.pendingChanges().length,
+          note: "The design is back to its state before that change." };
+      }
+      const confirmed = r.reason === "last-change-confirmed";
+      return {
+        refused: true,
+        code: confirmed ? "ChangeAlreadyConfirmed" : "NothingToUndo",
+        detail: confirmed
+          ? "The most recent change has been confirmed by a licensed engineer. An agent cannot " +
+            "revert confirmed work. Author a new change instead."
+          : "There is no agent-authored change to undo.",
+        measurements: { pendingCount: host.pendingChanges().length },
+        resolvedBy: confirmed ? [] : ["read_pending_changes"],
+        authority: ["ADR: an agent can never be the confirming party"],
+      };
+    },
+  );
+
+  add(
+    "propose_alternatives",
+    "Offer the engineer two to four DIFFERENT versions of the design and let them choose. " +
+      "Each alternative is a complete road plus a short rationale; the app computes every one " +
+      "honestly -- length, curve count, tightest radius, lowest K, and criteria compliance at a " +
+      "design speed -- and shows them side by side. " +
+      "\u26d4 NOTHING is applied, and there is deliberately no tool that adopts an alternative: " +
+      "ranking them needs judgement about site, budget and right-of-way that you do not have, " +
+      "and choosing one is the decision a licensed engineer is paid to make. Present the " +
+      "comparison and let them pick. " +
+      "Use this when the engineer asks an open question -- what are my options for this curve, " +
+      "show me a cheaper alignment -- rather than naming a specific value.",
+    S.obj({
+      question: S.str("The choice being put to the engineer, e.g. three alignments for the river crossing."),
+      designSpeedMph: S.num("Optional. When given, each alternative is also judged against it."),
+      emax: S.num("Maximum superelevation rate as a decimal for the criteria check. Default 0.06."),
+      alternatives: {
+        type: "array",
+        description:
+          "Two to four alternatives. Each is { label, rationale, design } where design has the " +
+          "same shape propose_full_design takes: name, beginStation, startE, startN, " +
+          "startAzimuthDeg, elements, pvis.",
+        items: { type: "object" },
+      },
+    }, ["question", "alternatives"]),
+    (args) => {
+      const raw = Array.isArray(args.alternatives) ? args.alternatives : [];
+      if (raw.length < 2 || raw.length > 4) {
+        return { error: true, code: "BadArgument",
+          detail: "propose_alternatives needs between 2 and 4 alternatives; got " + raw.length + "." };
+      }
+      const current = host.readForm();
+      const parsed: AlternativeInput[] = [];
+      for (let i = 0; i < raw.length; i += 1) {
+        const a = raw[i] as Record<string, unknown>;
+        const design = (a.design ?? a) as Record<string, unknown>;
+        const check = AiDesignProposal.safeParse({
+          ...design,
+          rationale: String(a.rationale ?? design.rationale ?? ""),
+        });
+        if (!check.success) {
+          return {
+            refused: true,
+            code: "AlternativeSchemaViolation",
+            detail: "Alternative " + (i + 1) + " (" + String(a.label ?? "unlabelled") +
+              ") does not match the design schema.",
+            issues: check.error.issues.map((x) => ({ path: x.path.join("."), message: x.message })),
+            measurements: { alternativeIndex: i },
+            resolvedBy: ["propose_alternatives"],
+            authority: ["RoadDesign v0.2 proposal schema"],
+          };
+        }
+        const form = proposalToForm(check.data);
+        parsed.push({
+          label: String(a.label ?? "option " + (i + 1)),
+          rationale: check.data.rationale,
+          // The engineer's standing typical sections are theirs, not the agent's to swap.
+          form: { ...form, templates: current.templates, drops: current.drops },
+        });
+      }
+      const speed = readNumber(args, "designSpeedMph");
+      const emax = readNumber(args, "emax") ?? 0.06;
+      const evaluated = evaluateAlternatives(parsed, speed, emax);
+      const shown = host.offerAlternatives(
+        String(args.question ?? "Choose an alternative"), parsed, speed, emax);
+      return {
+        offered: shown,
+        question: String(args.question ?? ""),
+        appliedAnything: false,
+        alternatives: evaluated,
+        note:
+          "Shown to the engineer for a decision. Nothing has changed. There is no tool that " +
+          "adopts one -- a person clicks the option they want.",
+      };
+    },
+  );
+
+  add(
+    "export_staking_csv",
+    "Export construction staking: for every station at the interval you choose, the coordinates " +
+      "and elevation of the centreline and of each template point, as CSV a survey crew can load. " +
+      "Offsets are signed -- negative left of centreline, positive right. " +
+      "This is the file a crew physically sets the road out from, so like the LandXML it is " +
+      "refused until a licensed engineer has confirmed every outstanding change.",
+    S.obj({
+      intervalFt: S.num("Station interval in feet. 25 or 50 is typical; 10 for tight urban work."),
+      includeOffsets: { type: "boolean",
+        description: "false gives centreline only. Default true (every template point)." },
+    }, ["intervalFt"]),
+    (args) => {
+      const interval = readNumber(args, "intervalFt");
+      if (interval === undefined || interval <= 0) {
+        return { error: true, code: "BadArgument", detail: "intervalFt must be a positive number." };
+      }
+      const built = tryBuild(host.readForm());
+      if (isRefusal(built)) return built;
+      const pending = host.pendingChanges();
+      if (pending.length > 0) {
+        return {
+          refused: true,
+          code: "AwaitingEngineerConfirmation",
+          detail: pending.length + " agent-proposed change(s) are unconfirmed. Staking data is " +
+            "what a crew builds from, so it cannot be produced until a licensed engineer " +
+            "confirms them in the Studio. There is deliberately no tool that clears this.",
+          measurements: { pendingCount: pending.length },
+          pendingChanges: pending.map((c) => c.description),
+          resolvedBy: [],
+          authority: ["ADR: an agent can never be the confirming party"],
+        };
+      }
+      const includeOffsets = args.includeOffsets !== false;
+      const opts = { intervalFt: interval, includeOffsets };
+      const rows = stakingRows(built.design, opts);
+      const csv = toStakingCsv(built.design, opts);
+      return { pointCount: rows.length, intervalFt: interval, includeOffsets,
+        lengthBytes: csv.length, csv };
     },
   );
 
