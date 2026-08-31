@@ -34,6 +34,9 @@ import { evaluateAlternatives, type AlternativeInput } from "./alternatives";
 import { fromDocument, toDocument } from "./design-document";
 import { parseLandXML } from "../importers/landxml";
 import { summariseEarthwork, type GroundSample, type Tin } from "../kernel/terrain";
+import { checkRoadside, lengthOf, roadsideQuantities, type RoadsideItem } from "../schema/roadside";
+import type { DesignSectionSurface } from "../importers/design-sections";
+import { summarisePlanFeatures, type PlanFeatureSet } from "../importers/plan-features";
 import { isRefusal, tryBuild, type Refusal } from "./webmcp-refusals";
 
 export const AGENT_PROVENANCE = "agent-proposed; awaiting engineer confirmation";
@@ -84,6 +87,12 @@ export interface StudioHost {
   onToolCall?(tool: string, result: unknown): void;
   /** Undo the most recent agent change. The host owns the history. */
   undoLastAgentChange(): { ok: true; description: string } | { ok: false; reason: string };
+  /** The existing site: buildings, kerbs, lot lines, read from a survey LandXML. */
+  planFeatures(): PlanFeatureSet | undefined;
+  setPlanFeatures(f: PlanFeatureSet | undefined): void;
+  /** As-designed cross sections read from an imported LandXML. */
+  designSections(): readonly DesignSectionSurface[];
+  setDesignSections(s: readonly DesignSectionSurface[]): void;
   /** The imported ground surface, if one has been loaded. */
   terrain(): Tin | undefined;
   /** Load or clear the ground surface. */
@@ -179,6 +188,34 @@ function applyOrPreview(
       note: "Nothing changed. Call again with commit: true to apply." };
   }
   host.writeForm(next, what);
+
+  // Read it back and prove the change survived.
+  //
+  // ⚠ This guard exists because set_segment_material once reported `committed`
+  // while the value was silently discarded: FormSegmentRow had no `material`
+  // field, so formToDesign dropped it on the floor. The tool lied, every test
+  // passed, and only the 3D legend showed it. That is a CLASS of bug -- any
+  // field added to the form and not threaded through the mapping vanishes the
+  // same way -- so success is now measured rather than assumed.
+  const readBack = tryBuild(host.readForm());
+  if (isRefusal(readBack)) {
+    return {
+      error: true,
+      code: "WriteNotReadable",
+      detail: `The change was applied but the design no longer builds: ${readBack.detail}`,
+    };
+  }
+  if (JSON.stringify(readBack.design) !== JSON.stringify(built.design)) {
+    return {
+      error: true,
+      code: "LossyWrite",
+      detail:
+        `"${what}" was applied but did not survive the round trip -- the design read back ` +
+        `differs from the one that was validated. Some authored field is being dropped ` +
+        `between the form and the design. This is a defect in the app, not in your request.`,
+    };
+  }
+
   return {
     committed: true,
     ...consequence,
@@ -235,6 +272,12 @@ const ANNOTATIONS: Readonly<Record<string, WebMcpToolAnnotations>> = {
   load_design_document: { title: "Load a design", readOnlyHint: false, destructiveHint: true, idempotentHint: true },
   import_landxml: { title: "Import a LandXML alignment", readOnlyHint: false, destructiveHint: true, idempotentHint: true },
   read_ground: { title: "Read cut and fill", readOnlyHint: true, idempotentHint: true },
+  read_roadside: { title: "Read roadside furniture", readOnlyHint: true, idempotentHint: true },
+  read_design_sections: { title: "Read as-designed sections", readOnlyHint: true, idempotentHint: true },
+  read_site_features: { title: "Read the existing site", readOnlyHint: true, idempotentHint: true },
+  place_roadside_item: { title: "Place roadside furniture", readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  remove_roadside_item: { title: "Remove a roadside item", readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  set_segment_material: { title: "Set a segment material", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   read_terrain_extent: { title: "Read the ground extent", readOnlyHint: true, idempotentHint: true },
   set_coordinate_system: { title: "Set the coordinate system", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   propose_alternatives: { title: "Offer the engineer options", readOnlyHint: true, idempotentHint: true },
@@ -781,16 +824,45 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
           authority: ["LandXML 1.1 / 1.2"],
         };
       }
-      if (parsed.alignments.length === 0 && parsed.surfaces.length > 0) {
-        const tin = parsed.surfaces[0]!;
-        host.setTerrain(tin);
+      // A file with no alignment still carries CONTEXT worth having: a survey is
+      // mostly plan features, and a terrain export is mostly a surface. Refusing
+      // it for want of an alignment threw away the whole reason to open it.
+      if (parsed.alignments.length === 0) {
+        const tin = parsed.surfaces[0];
+        if (tin) host.setTerrain(tin);
+        host.setDesignSections(parsed.designSections);
+        host.setPlanFeatures(parsed.planFeatures);
+
+        const loaded: string[] = [];
+        if (tin) loaded.push(`ground surface "${tin.name}" (${tin.faces.length} triangles)`);
+        if (parsed.planFeatures.features.length > 0) {
+          loaded.push(`${parsed.planFeatures.features.length} site features`);
+        }
+        if (parsed.designSections.length > 0) {
+          loaded.push(`${parsed.designSections.length} as-designed section surface(s)`);
+        }
+        if (loaded.length === 0) {
+          return {
+            refused: true,
+            code: "NothingToImport",
+            detail: "That file has no alignment, no surface and no plan features.",
+            measurements: {},
+            resolvedBy: [],
+            authority: ["LandXML 1.1 / 1.2"],
+          };
+        }
         return {
           committed: true,
-          change: `loaded ground surface "${tin.name}"`,
-          groundSurface: { name: tin.name, triangles: tin.faces.length, points: tin.points.length },
+          change: `loaded ${loaded.join(" and ")}`,
+          groundSurface: tin
+            ? { name: tin.name, triangles: tin.faces.length, points: tin.points.length }
+            : undefined,
+          siteFeatures: parsed.planFeatures.features.length,
+          siteExtentFt: parsed.planFeatures.bounds,
           provenance: AGENT_PROVENANCE,
-          note: "That file carried ground but no alignment. The surface is loaded; cut and fill " +
-            "can now be read with read_ground.",
+          note:
+            "That file carried context but no alignment, so nothing was designed -- this is the " +
+            "site as it already is. Place an alignment inside the extent above to design into it.",
         };
       }
 
@@ -811,6 +883,8 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
       }
 
       if (parsed.surfaces.length > 0) host.setTerrain(parsed.surfaces[0]!);
+      host.setDesignSections(parsed.designSections);
+      host.setPlanFeatures(parsed.planFeatures);
 
       const current = host.readForm();
       // A profile must span the alignment; an imported file often carries none, or
@@ -935,6 +1009,222 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
         },
         stationsOffSurface: off,
         alignmentFullyOnSurface: off === 0,
+      };
+    },
+  );
+
+  add(
+    "place_roadside_item",
+    "Place guardrail, concrete barrier, a pavement marking or curb along the road, between two " +
+      "stations, on one side, at an offset from the centreline. It is drawn in 3D exactly where " +
+      "you put it. " +
+      "Offset is a positive distance -- side carries the direction. A pavement marking must state " +
+      "its pattern, because solid and dashed mean different things to a driver. " +
+      "\u26d4 This tool does NOT decide whether a guardrail is WARRANTED. Warrant depends on fill " +
+      "height, side slope and clear zone, and is a judgement a licensed engineer is paid to make. " +
+      "You may place what the engineer asks for and report what you placed; you may not conclude " +
+      "that a road needs protection.",
+    S.obj({
+      id: S.str("Short stable id, e.g. gr-left-1. Used to change or remove this item later."),
+      kind: S.enum(["guardrail", "concrete-barrier", "pavement-marking", "curb"], "What it is."),
+      side: S.enum(["left", "right"], "Which side of the centreline it runs along."),
+      beginStationFt: S.num("Station where it starts, in feet."),
+      endStationFt: S.num("Station where it ends, in feet. Must be greater than the start."),
+      offsetFt: S.num("Distance from centreline in feet, always positive."),
+      heightFt: S.num("Height above the road surface in feet. Defaults by kind."),
+      pattern: S.enum(["solid", "dashed", "double-solid"], "Required for a pavement marking."),
+      note: S.str("Optional note, e.g. a standard detail number."),
+      commit: S.commit,
+    }, ["id", "kind", "side", "beginStationFt", "endStationFt", "offsetFt"]),
+    (args) => {
+      const next = clone(host.readForm());
+      const begin = readNumber(args, "beginStationFt");
+      const end = readNumber(args, "endStationFt");
+      const offset = readNumber(args, "offsetFt");
+      if (begin === undefined || end === undefined || offset === undefined) {
+        return { error: true, code: "BadArgument",
+          detail: "beginStationFt, endStationFt and offsetFt must all be numbers." };
+      }
+      const item: RoadsideItem = {
+        id: String(args.id ?? ""),
+        kind: args.kind as RoadsideItem["kind"],
+        side: args.side === "left" ? "left" : "right",
+        beginStation: begin,
+        endStation: end,
+        offsetFt: offset,
+        ...(readNumber(args, "heightFt") !== undefined ? { heightFt: readNumber(args, "heightFt") } : {}),
+        ...(typeof args.pattern === "string" ? { pattern: args.pattern as RoadsideItem["pattern"] } : {}),
+        ...(typeof args.note === "string" ? { note: args.note } : {}),
+      };
+      next.roadside = [...(next.roadside ?? []), item];
+
+      const range = alignmentRangeFromForm(next);
+      const problems = checkRoadside(next.roadside, range.begin, range.end);
+      if (problems.length > 0) {
+        const p0 = problems[0]!;
+        return {
+          refused: true, code: p0.code, detail: p0.detail,
+          measurements: p0.measurements, allProblems: problems,
+          resolvedBy: ["place_roadside_item", "read_roadside"],
+          authority: ["RoadDesign v0.2 roadside"],
+        };
+      }
+      const result = applyOrPreview(host, next, args.commit === true,
+        `place ${item.kind} "${item.id}" ${item.side} ${begin}-${end} at ${offset} ft`);
+      return isRefusal(result) ? result
+        : { ...(result as object), placed: { ...item, lengthFt: lengthOf(item) } };
+    },
+  );
+
+  add(
+    "remove_roadside_item",
+    "Remove one roadside item by its id. \u26d4 DESTRUCTIVE: the item and its authored placement " +
+      "are gone. Preview first.",
+    S.obj({ id: S.str("The item's id."), commit: S.commit }, ["id"]),
+    (args) => {
+      const next = clone(host.readForm());
+      const id = String(args.id ?? "");
+      const before = next.roadside ?? [];
+      const after = before.filter((r) => r.id !== id);
+      if (after.length === before.length) {
+        return {
+          refused: true, code: "NoSuchRoadsideItem",
+          detail: `Nothing on the roadside is called "${id}".`,
+          measurements: { itemCount: before.length },
+          available: before.map((r) => r.id),
+          resolvedBy: ["read_roadside"],
+          authority: ["RoadDesign v0.2 roadside"],
+        };
+      }
+      next.roadside = after;
+      return applyOrPreview(host, next, args.commit === true, `remove roadside item "${id}"`);
+    },
+  );
+
+  add(
+    "read_roadside",
+    "Read every roadside item on the design, with a quantity take-off by kind -- count and total " +
+      "length in feet, which is what goes on a bid schedule. Also reports any placement problems.",
+    S.obj({}),
+    () => {
+      const form = host.readForm();
+      const items = form.roadside ?? [];
+      let problems: unknown[] = [];
+      try {
+        const range = alignmentRangeFromForm(form);
+        problems = checkRoadside(items, range.begin, range.end);
+      } catch { /* an invalid alignment is reported by what_do_i_need */ }
+      return {
+        count: items.length,
+        items: items.map((r) => ({ ...r, lengthFt: lengthOf(r) })),
+        quantities: roadsideQuantities(items),
+        problems,
+        note: items.length === 0
+          ? "Nothing has been placed. That means none was authored, not that none is needed."
+          : undefined,
+      };
+    },
+  );
+
+  add(
+    "set_segment_material",
+    "State what a template segment is made of -- asphalt, concrete, gravel, grass or earth. The " +
+      "3D view draws each material differently and puts an edge line where pavement meets " +
+      "something that is not pavement. " +
+      "\u26d4 Material is never inferred from a segment's NAME: a shoulder is asphalt on one " +
+      "project and gravel on the next, and guessing would put a surface on the drawing that " +
+      "nobody authored. A segment with no material stated is drawn neutrally.",
+    S.obj({
+      template: S.str("Template name, e.g. 2-lane."),
+      side: S.enum(["left", "right"], "Which side of the centreline."),
+      index: S.int("1-based segment index, counting outward from the centreline."),
+      material: S.enum(["asphalt", "concrete", "gravel", "grass", "earth"], "What it is made of."),
+      commit: S.commit,
+    }, ["template", "side", "index", "material"]),
+    (args) => {
+      const next = clone(host.readForm());
+      const t = next.templates.find((x) => x.name === args.template);
+      if (!t) {
+        return { refused: true, code: "UnknownTemplate",
+          detail: `No template named "${String(args.template)}".`,
+          measurements: { templateCount: next.templates.length },
+          resolvedBy: ["read_design"], authority: ["RoadDesign v0.2 templates"] };
+      }
+      const side = args.side === "left" ? "left" : "right";
+      const i = (readNumber(args, "index") ?? 0) - 1;
+      if (i < 0 || i >= t[side].length) {
+        return outOfRange(`${side} segment`, i + 1, t[side].length, ["read_design"]);
+      }
+      t[side][i]!.material = args.material as NonNullable<typeof t[typeof side][number]["material"]>;
+      return applyOrPreview(host, next, args.commit === true,
+        `${args.template} ${side} segment ${i + 1} is ${args.material}`);
+    },
+  );
+
+  add(
+    "read_design_sections",
+    "Read the AS-DESIGNED cross sections that came with an imported LandXML -- the surfaces the " +
+      "original designer produced, station by station, each named and sided. On a real file these " +
+      "are the pavement structure: a wearing course, a formation level, and the ground beneath. " +
+      "\u26a0 Not every named surface is roadway. Width tells them apart, and is reported for each: " +
+      "on the file this was measured against, the wearing course spans 38.6 ft and the soil " +
+      "section spans 10,208 ft. Narrowest first, so the pavement comes to hand. " +
+      "\u26d4 These are REFERENCE, not your design. They are the original designer's sections, held " +
+      "separately so they cannot be confused with the corridor this app sweeps from a template.",
+    S.obj({}),
+    () => {
+      const sections = host.designSections();
+      if (sections.length === 0) {
+        return { loaded: false,
+          note: "No as-designed sections. Import a LandXML that carries CrossSect elements." };
+      }
+      return {
+        loaded: true,
+        count: sections.length,
+        surfaces: sections.map((d) => ({
+          name: d.name,
+          stationCount: d.stationCount,
+          maxWidthFt: d.maxWidthFt,
+          offsetRangeFt: [d.minOffsetFt, d.maxOffsetFt],
+          elevationRangeFt: [d.minElevationFt, d.maxElevationFt],
+          looksLikeRoadway: d.maxWidthFt < 200,
+        })),
+        note:
+          "looksLikeRoadway is a width test, not a reading of the name -- surface names are in " +
+          "whatever language the designer used.",
+      };
+    },
+  );
+
+  add(
+    "read_site_features",
+    "Read the EXISTING site imported from a survey LandXML -- buildings, kerbs, sidewalks, lot " +
+      "lines, edge of pavement. This is what is already on the ground before anything is designed, " +
+      "and it is the context a new alignment has to fit into. " +
+      "Returns the site extent, so you can place an alignment inside it rather than guessing at " +
+      "coordinates. " +
+      "\u26d4 Feature names are carried exactly as the file wrote them and are NOT interpreted. " +
+      "\"BLDG1|1094\" is a building on one survey and could be anything on the next; the grouping " +
+      "in the summary is a label taken from the file's own separator, not a classification.",
+    S.obj({}),
+    () => {
+      const set = host.planFeatures();
+      if (!set || set.features.length === 0) {
+        return { loaded: false,
+          note: "No site features. Import a survey LandXML carrying PlanFeature elements." };
+      }
+      return {
+        loaded: true,
+        featureCount: set.features.length,
+        pointCount: set.features.reduce((n, f) => n + f.points.length, 0),
+        unresolvedRefs: set.unresolvedRefs,
+        siteExtentFt: set.bounds,
+        groups: summarisePlanFeatures(set),
+        note:
+          set.unresolvedRefs > 0
+            ? `${set.unresolvedRefs} point reference(s) could not be resolved and those segments ` +
+              `were dropped rather than drawn to a guessed position.`
+            : "Every point reference resolved.",
       };
     },
   );

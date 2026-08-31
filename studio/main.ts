@@ -13,6 +13,8 @@ import { AgentActivityLog, classifyResult } from "../src/studio/agent-activity";
 import { AlternativeSet, evaluateAlternatives, type AlternativeInput } from "../src/studio/alternatives";
 import { autosave, decodeFragment, loadAutosave, shareUrl } from "../src/studio/design-document";
 import { parseLandXML } from "../src/importers/landxml";
+import type { DesignSectionSurface } from "../src/importers/design-sections";
+import type { PlanFeatureSet } from "../src/importers/plan-features";
 import { TinSampler, sampleGround, summariseEarthwork, type Tin } from "../src/kernel/terrain";
 import { sampleAlignment as sampleAlign } from "../src/kernel/sample";
 import { transitionFor } from "../src/kernel/superelevation";
@@ -20,6 +22,7 @@ import { sampleAlignment, sampleProfile } from "../src/kernel/sample";
 import { azimuthToBearing, degreesToDms } from "../src/util/angle";
 import { createViewer, type LegendEntry, type Viewer3D } from "./viewer3d";
 import type { RoadDesign, SuperelevationSpec } from "../src/schema/road-design";
+import type { RoadsideItem } from "../src/schema/roadside";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -54,6 +57,8 @@ let drops: FormDropRow[] = [{ template: "2-lane", toStation: "" }];
 // Banking policy. Undefined = template cross slopes everywhere (the v0
 // behaviour); set by the agent through set_superelevation.
 let superelevation: SuperelevationSpec | undefined;
+// Guardrail, barrier, markings and curb the engineer or an agent has placed.
+let roadside: RoadsideItem[] = [];
 // Everything an agent authors is held as PROPOSED until a person confirms it.
 const agentLedger = new AgentChangeLedger();
 // Every WebMCP tool call, recorded from inside the tool surface. A filled log
@@ -66,6 +71,11 @@ const alternatives = new AlternativeSet();
 // works without it, it just cannot say anything about cut and fill.
 let terrain: Tin | undefined;
 let terrainSampler: TinSampler | undefined;
+// The original designer's sections, held apart from our own corridor so the two
+// can never be mistaken for each other.
+let designSections: readonly DesignSectionSurface[] = [];
+// The existing site, when a survey was imported.
+let planFeatures: PlanFeatureSet | undefined;
 
 function setTerrain(tin: Tin | undefined): void {
   terrain = tin;
@@ -108,6 +118,7 @@ function readForm(): StudioForm {
     templates,
     drops,
     ...(superelevation ? { superelevation } : {}),
+    ...(roadside.length > 0 ? { roadside } : {}),
   };
 }
 
@@ -720,6 +731,7 @@ function writeForm(next: StudioForm, agentChange?: string): void {
   templates = next.templates;
   drops = next.drops;
   superelevation = next.superelevation;
+  roadside = next.roadside ?? [];
   syncSupControls();
   renderElements();
   renderPvis();
@@ -819,6 +831,7 @@ function restoreForm(f: StudioForm): void {
   templates = f.templates;
   drops = f.drops;
   superelevation = f.superelevation;
+  roadside = f.roadside ?? [];
   syncSupControls();
   renderElements();
   renderPvis();
@@ -949,6 +962,10 @@ const registeredTools = registerWebMcp({
     renderAgentLog();
     return { ok: true as const, description: r.change.description };
   },
+  planFeatures: () => planFeatures,
+  setPlanFeatures: (f) => { planFeatures = f; viewer?.setPlanFeatures(f); refresh(); },
+  designSections: () => designSections,
+  setDesignSections: (d) => { designSections = d; viewer?.setDesignSections(d); refresh(); },
   terrain: () => terrain,
   setTerrain,
   groundProfile: (intervalFt) => {
@@ -1034,7 +1051,7 @@ function switchView(to3d: boolean): void {
   $("view3d").style.display = to3d ? "flex" : "none";
   $("btnViewDesign").classList.toggle("active", !to3d);
   $("btnView3d").classList.toggle("active", to3d);
-  if (to3d) { activate3d(); viewer?.setTerrain(terrain); }
+  if (to3d) { activate3d(); viewer?.setTerrain(terrain); viewer?.setDesignSections(designSections); viewer?.setPlanFeatures(planFeatures); }
   else viewer?.setActive(false);
 }
 $("btnViewDesign").addEventListener("click", () => switchView(false));
@@ -1216,6 +1233,10 @@ $("importLandxml").addEventListener("change", (ev) => {
       return;
     }
     if (parsed.surfaces.length > 0) setTerrain(parsed.surfaces[0]!);
+    designSections = parsed.designSections;
+    viewer?.setDesignSections(designSections);
+    planFeatures = parsed.planFeatures;
+    viewer?.setPlanFeatures(planFeatures);
     const a = parsed.alignments[0];
     if (!a) {
       status.innerHTML =

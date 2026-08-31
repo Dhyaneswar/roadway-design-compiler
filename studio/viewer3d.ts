@@ -12,12 +12,20 @@ import { buildCorridorMesh, type CorridorMesh } from "../src/viewer/corridor-mes
 import { fmtSta } from "../src/util/station";
 import type { RoadDesign } from "../src/schema/road-design";
 import type { Tin } from "../src/kernel/terrain";
+import { buildRoadsideGeometry } from "../src/viewer/roadside-mesh";
+import { buildDesignSectionMesh } from "../src/viewer/design-section-mesh";
+import type { DesignSectionSurface } from "../src/importers/design-sections";
+import type { PlanFeatureSet } from "../src/importers/plan-features";
 
 const SECTION_INTERVAL_FT = 25;
 
 export interface Viewer3D {
   /** Recompute the corridor and rebuild the scene. Throws on kernel errors. */
   update(design: RoadDesign): void;
+  /** Show the existing site -- buildings, kerbs, lot lines -- or undefined to remove it. */
+  setPlanFeatures(set: PlanFeatureSet | undefined): void;
+  /** Show the original designer's as-designed sections, or [] to remove them. */
+  setDesignSections(sections: readonly DesignSectionSurface[]): void;
   /** Show existing ground under the road, or pass undefined to remove it.
    *  Redrawn on the next update() so it shares the corridor's origin. */
   setTerrain(tin: Tin | undefined): void;
@@ -33,9 +41,37 @@ export interface LegendEntry {
   color: string;
 }
 
-/** Distinct surface colors, assigned per template by first appearance.
- *  Saturated on purpose — a lit surface washes out subtle tints. */
+/**
+ * Colours for AUTHORED materials. A segment the engineer has called asphalt is
+ * drawn as asphalt; one with no stated material falls through to the palette
+ * below and is only distinguished from its neighbours, not characterised.
+ *
+ * ⛔ Nothing here infers material from a segment's NAME. "shoulder" is asphalt on
+ * one project and gravel on the next, and guessing would put a surface on the
+ * drawing that nobody authored.
+ */
+const MATERIAL_COLOR: Readonly<Record<string, number>> = {
+  asphalt: 0x3a3f45,
+  concrete: 0xa9a79f,
+  gravel: 0x8a7f6a,
+  grass: 0x4a6b3a,
+  earth: 0x6b5a45,
+};
+
+/** Fallback for segments with no authored material. Distinguishes, does not describe. */
 const PALETTE = [0x8b949e, 0x2f81f7, 0x2ea043, 0xd29922, 0xa371f7, 0xdb6d28];
+
+/** Painted markings, drawn where surfaces actually meet. */
+const centrelineMaterial = new THREE.LineBasicMaterial({ color: 0xe8d44d });
+
+/** Roadside furniture, by kind. Steel reads cool, concrete warm, paint bright. */
+const ROADSIDE_MATERIAL: Readonly<Record<string, THREE.Material>> = {
+  guardrail: new THREE.MeshStandardMaterial({ color: 0x9aa4ad, roughness: 0.55, metalness: 0.7, side: THREE.DoubleSide }),
+  "concrete-barrier": new THREE.MeshStandardMaterial({ color: 0xb8b4aa, roughness: 0.9, metalness: 0, side: THREE.DoubleSide }),
+  curb: new THREE.MeshStandardMaterial({ color: 0xc2beb4, roughness: 0.92, metalness: 0, side: THREE.DoubleSide }),
+};
+const markingMaterial = new THREE.LineBasicMaterial({ color: 0xf2f2f2 });
+const edgeOfPavementMaterial = new THREE.LineBasicMaterial({ color: 0xe8e8e8 });
 
 export function createViewer(
   container: HTMLElement,
@@ -100,6 +136,15 @@ export function createViewer(
   scene.add(group);
   let exaggeration = 1;
 let terrainTin: Tin | undefined;
+let designSectionSurfaces: readonly DesignSectionSurface[] = [];
+let sitePlanFeatures: PlanFeatureSet | undefined;
+/** Existing site linework: cool and thin, so the design reads over it. */
+const siteFeatureMaterial = new THREE.LineBasicMaterial({ color: 0x6f8fa8 });
+/** Warm and translucent, so the app's own corridor still reads on top of it. */
+const designSectionMaterial = new THREE.MeshStandardMaterial({
+  color: 0xc08a4a, roughness: 0.85, metalness: 0, side: THREE.DoubleSide,
+  transparent: true, opacity: 0.55,
+});
 let terrainMesh: THREE.Mesh | undefined;
 
 /** Earth-toned, matte, and drawn slightly back so the road reads on top of it. */
@@ -329,6 +374,14 @@ let meshData: CorridorMesh | null = null;
   });
 
   return {
+    setPlanFeatures(set: PlanFeatureSet | undefined): void {
+      sitePlanFeatures = set;
+      if (lastDesignForTerrain) this.update(lastDesignForTerrain);
+    },
+    setDesignSections(sections: readonly DesignSectionSurface[]): void {
+      designSectionSurfaces = sections;
+      if (lastDesignForTerrain) this.update(lastDesignForTerrain);
+    },
     setTerrain(tin: Tin | undefined): void {
       terrainTin = tin;
       if (meshData) this.update(lastDesignForTerrain ?? (undefined as unknown as RoadDesign));
@@ -349,19 +402,22 @@ let meshData: CorridorMesh | null = null;
       // visible as color changes, with a legend for the names.
       const matIndex = new Map<string, number>();
       for (const g of mesh.groups) {
-        if (!matIndex.has(g.template)) {
-          const color = PALETTE[matIndex.size % PALETTE.length]!;
-          matIndex.set(g.template, roadMaterials.length);
+        if (!matIndex.has(g.kind)) {
+          const authored = MATERIAL_COLOR[g.kind];
+          const color = authored ?? PALETTE[matIndex.size % PALETTE.length]!;
+          matIndex.set(g.kind, roadMaterials.length);
           roadMaterials.push(
             new THREE.MeshStandardMaterial({
               color,
-              roughness: 0.85,
+              // An authored material gets its own finish: asphalt is matt, concrete
+              // and gravel less so. Unstated segments keep the old neutral look.
+              roughness: authored === undefined ? 0.85 : g.kind === "asphalt" ? 0.97 : 0.9,
               metalness: 0.0,
               side: THREE.DoubleSide,
             }),
           );
         }
-        geo.addGroup(g.start, g.count, matIndex.get(g.template)!);
+        geo.addGroup(g.start, g.count, matIndex.get(g.kind)!);
       }
       onLegend(
         [...matIndex.entries()].map(([name, mi]) => ({
@@ -371,6 +427,55 @@ let meshData: CorridorMesh | null = null;
       );
       roadMesh = new THREE.Mesh(geo, roadMaterials);
       group.add(roadMesh);
+
+      // The existing site. Features whose survey gave no elevation are drawn at the
+      // corridor's own datum rather than at zero, which would drop them through the
+      // ground; they are still drawn, because a building with no z is still there.
+      if (sitePlanFeatures) {
+        for (const f of sitePlanFeatures.features) {
+          const pts: number[] = [];
+          for (const q of f.points) {
+            pts.push(q.e - meshData.origin.e, (q.z ?? meshData.origin.z) - meshData.origin.z,
+              -(q.n - meshData.origin.n));
+          }
+          if (pts.length < 6) continue;
+          const fg = new THREE.BufferGeometry();
+          fg.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
+          group.add(new THREE.Line(fg, siteFeatureMaterial));
+        }
+      }
+
+      // The original designer's pavement, when the imported file carried it.
+      // Only the roadway-width surfaces: a 10,000 ft soil section is ground, not
+      // pavement, and drawing it here would bury the road.
+      for (const surf of designSectionSurfaces) {
+        if (surf.maxWidthFt >= 200) continue;
+        const dm = buildDesignSectionMesh(surf, design.alignment, meshData.origin);
+        if (dm.indices.length === 0) continue;
+        const dg = new THREE.BufferGeometry();
+        dg.setAttribute("position", new THREE.Float32BufferAttribute(dm.positions, 3));
+        dg.setIndex(dm.indices);
+        dg.computeVertexNormals();
+        group.add(new THREE.Mesh(dg, designSectionMaterial));
+      }
+
+      // Roadside furniture: guardrail, barrier, curb and markings, each swept
+      // between the stations an engineer authored for it. Nothing appears here
+      // that a person did not place.
+      for (const r of buildRoadsideGeometry(design, meshData.origin)) {
+        if (r.indices.length > 0) {
+          const rg = new THREE.BufferGeometry();
+          rg.setAttribute("position", new THREE.Float32BufferAttribute(r.positions, 3));
+          rg.setIndex(r.indices);
+          rg.computeVertexNormals();
+          group.add(new THREE.Mesh(rg, ROADSIDE_MATERIAL[r.kind] ?? ROADSIDE_MATERIAL.guardrail!));
+        }
+        if (r.line.length >= 6) {
+          const lg = new THREE.BufferGeometry();
+          lg.setAttribute("position", new THREE.Float32BufferAttribute(r.line, 3));
+          group.add(new THREE.Line(lg, r.kind === "pavement-marking" ? markingMaterial : edgeOfPavementMaterial));
+        }
+      }
 
       // Ground goes in last, in the road's frame, reaching a little past the
       // corridor so the road is seen sitting in the landscape rather than on a
@@ -394,6 +499,20 @@ let meshData: CorridorMesh | null = null;
       const clGeo = new THREE.BufferGeometry();
       clGeo.setAttribute("position", new THREE.Float32BufferAttribute(mesh.centerline, 3));
       group.add(new THREE.Line(clGeo, clMaterial));
+
+      // Edge of pavement and centreline, lifted a hair so they read on the surface
+      // rather than fighting it for the same depth. These are where the authored
+      // surfaces meet -- not an authored striping plan, which nothing here holds.
+      for (const line of mesh.edgeLines) {
+        const pts = line.points.slice();
+        for (let i = 1; i < pts.length; i += 3) pts[i] = pts[i]! + 0.05;
+        const g2 = new THREE.BufferGeometry();
+        g2.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
+        group.add(new THREE.Line(
+          g2,
+          line.kind === "centreline" ? centrelineMaterial : edgeOfPavementMaterial,
+        ));
+      }
 
       // Invisible snap layer: one point per template point, raycast targets
       // for the AccuSnap-style cursor (geometry shared with nothing else).

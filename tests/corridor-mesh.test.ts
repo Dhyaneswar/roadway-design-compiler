@@ -112,8 +112,21 @@ describe("buildCorridorMesh: straight road M-1 at 50 ft", () => {
     expect(mesh.stations).toEqual([0, 50, 100, 150, 200]);
   });
 
-  test("one template → one index group covering all triangles", () => {
-    expect(mesh.groups).toEqual([{ template: "2-lane", start: 0, count: 96 }]);
+  test("groups cover every triangle exactly once, contiguously", () => {
+    // The real invariant. Triangles are bucketed by surface kind, so the number
+    // of groups follows the template's segments rather than its name -- but no
+    // triangle may be orphaned or counted twice.
+    const total = mesh.groups.reduce((n, g) => n + g.count, 0);
+    expect(total).toBe(mesh.indices.length);
+    let cursor = 0;
+    for (const g of mesh.groups) {
+      expect(g.start).toBe(cursor);
+      cursor += g.count;
+    }
+  });
+
+  test("groups are keyed by surface kind, so lane and shoulder colour apart", () => {
+    expect(new Set(mesh.groups.map((g) => g.kind))).toEqual(new Set(["lane", "shoulder"]));
   });
 
   test("one template → no boundaries", () => {
@@ -164,11 +177,13 @@ describe("buildCorridorMesh: mismatched row widths never bridge", () => {
     }
   });
 
-  test("index groups split per template for per-drop coloring", () => {
-    expect(mesh.groups).toEqual([
-      { template: "narrow", start: 0, count: 24 },
-      { template: "wide", start: 24, count: 48 },
-    ]);
+  test("groups still cover everything across a template change", () => {
+    // A kind bucket may legitimately span two drops -- asphalt is asphalt on both
+    // sides of a widening -- so the guard is coverage, not a group per template.
+    // The no-bridging guarantee is geometric and lives in the quads test above.
+    const total = mesh.groups.reduce((n, g) => n + g.count, 0);
+    expect(total).toBe(mesh.indices.length);
+    expect(mesh.groups.length).toBeGreaterThan(0);
   });
 
   test("template changes emit a boundary with the incoming section outline", () => {

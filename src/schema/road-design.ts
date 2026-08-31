@@ -1,3 +1,4 @@
+import type { RoadsideItem } from "./roadside";
 // RoadDesign schema v0 — the single source of truth every other module reads/writes.
 // Element model follows FDOT's Roadway 3D Modeling element matrix conventions
 // (alignment + station/offset location data; US survey feet).
@@ -59,8 +60,25 @@ export interface VerticalProfile {
   pvis: PVI[];
 }
 
+/**
+ * What a template segment is made of.
+ *
+ * Authored, never inferred. It drives how the surface is drawn and where edge
+ * lines fall, so a segment with no material is drawn neutrally rather than being
+ * guessed at from its name -- "shoulder" is asphalt on one project and gravel on
+ * the next, and the difference is the engineer's to state.
+ */
+export type SegmentMaterial =
+  | "asphalt"
+  | "concrete"
+  | "gravel"
+  | "grass"
+  | "earth";
+
 export interface TemplateSegment {
   name: string;
+  /** Optional. Absent means unstated, which is drawn neutrally. */
+  material?: SegmentMaterial;
   /** Horizontal width of this segment, ft (measured outward) */
   width: number;
   /** Cross slope, percent; negative drains away from centerline */
@@ -121,6 +139,9 @@ export interface SuperelevationSpec {
 }
 
 export interface RoadDesign {
+  /** Guardrail, barrier, markings and curb the engineer has authored.
+   *  Absent means none were placed -- never that none are needed. */
+  roadside?: RoadsideItem[];
   name: string;
   alignment: HorizontalAlignment;
   profile: VerticalProfile;

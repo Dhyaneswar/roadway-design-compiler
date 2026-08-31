@@ -5,7 +5,7 @@
 import { computeHorizontal } from "./horizontal";
 import { computeVertical } from "./vertical";
 import { sectionOffsets } from "./template-section";
-import type { RoadDesign, TemplateSegment } from "../schema/road-design";
+import type { RoadDesign, SegmentMaterial, TemplateSegment } from "../schema/road-design";
 import { crossSlopeAt, transitionFor,
   type SuperelevationTransition } from "./superelevation";
 
@@ -18,6 +18,8 @@ export interface Point3 {
 export interface SectionPoint {
   /** Segment name from the template */
   name: string;
+  /** Segment material, when the engineer stated one. */
+  material?: SegmentMaterial;
   /** Horizontal offset from centerline, ft (positive outward) */
   offset: number;
   point: Point3;
@@ -46,8 +48,9 @@ function sidePoints(
   const az = offsetAzimuthDeg * DEG;
   const ue = Math.sin(az);
   const un = Math.cos(az);
-  return sectionOffsets(segments).map(({ name, offset, dz }) => ({
+  return sectionOffsets(segments).map(({ name, offset, dz, material }) => ({
     name,
+    ...(material ? { material } : {}),
     offset,
     point: {
       e: centerline.e + offset * ue,
@@ -69,8 +72,11 @@ function lerpSegments(
   to: TemplateSegment[],
   t: number,
 ): TemplateSegment[] {
+  // Material does not interpolate -- it is a category, not a quantity. The
+  // segment being tapered TO owns it, which is what a drop transition means.
   return to.map((seg, i) => ({
     name: seg.name,
+    ...(seg.material ? { material: seg.material } : {}),
     width: from[i]!.width + (seg.width - from[i]!.width) * t,
     slopePercent: from[i]!.slopePercent + (seg.slopePercent - from[i]!.slopePercent) * t,
   }));

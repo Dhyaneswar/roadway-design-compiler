@@ -48,10 +48,13 @@ const verticalProfile = z
     { message: "PVIs must be in increasing station order" },
   );
 
+const segmentMaterial = z.enum(["asphalt", "concrete", "gravel", "grass", "earth"]);
+
 const templateSegment = z.object({
   name: z.string().min(1),
   width: z.number().positive(),
   slopePercent: z.number().finite(),
+  material: segmentMaterial.optional(),
 });
 
 const template = z.object({
@@ -92,6 +95,18 @@ const superelevationSpec = z.object({
   laneAdjustmentFactor: z.number().positive().optional(),
 });
 
+const roadsideItem = z.object({
+  id: z.string().min(1),
+  kind: z.enum(["guardrail", "concrete-barrier", "pavement-marking", "curb"]),
+  side: z.enum(["left", "right"]),
+  beginStation: z.number().finite(),
+  endStation: z.number().finite(),
+  offsetFt: z.number().positive(),
+  heightFt: z.number().nonnegative().optional(),
+  pattern: z.enum(["solid", "dashed", "double-solid"]).optional(),
+  note: z.string().optional(),
+});
+
 const roadDesign = z
   .object({
     name: z.string().min(1),
@@ -101,6 +116,7 @@ const roadDesign = z
     drops: z.array(drop),
     crs: projectCrs.optional(),
     superelevation: superelevationSpec.optional(),
+    roadside: z.array(roadsideItem).optional(),
   })
   .refine((d) => d.drops.every((x) => x.template in d.templates), {
     message: "every drop must reference a defined template",

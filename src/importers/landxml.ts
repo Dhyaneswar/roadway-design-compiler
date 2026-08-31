@@ -29,6 +29,8 @@
 
 import type { HorizontalElement, PVI } from "../schema/road-design";
 import { makeTin, type Tin, type TinFace, type TinPoint } from "../kernel/terrain";
+import { parseDesignSections, type DesignSectionSurface } from "./design-sections";
+import { parsePlanFeatures, type PlanFeatureSet } from "./plan-features";
 
 export interface ImportedAlignment {
   name: string;
@@ -44,7 +46,11 @@ export interface ImportedAlignment {
 }
 
 export type ImportResult =
-  | { ok: true; alignments: ImportedAlignment[]; surfaces: Tin[] }
+  | { ok: true; alignments: ImportedAlignment[]; surfaces: Tin[];
+      /** As-designed cross sections, when the file carries them. */
+      designSections: DesignSectionSurface[];
+      /** The site that already exists: buildings, kerbs, lot lines. */
+      planFeatures: PlanFeatureSet }
   | { ok: false; code: string; detail: string; measurements?: Record<string, number> };
 
 const DEG = 180 / Math.PI;
@@ -113,7 +119,8 @@ function preflight(xml: string): ImportResult | undefined {
     return { ok: false, code: "NotLandXml",
       detail: "No <LandXML> root element. This reader takes LandXML 1.1 or 1.2." };
   }
-  if (!/<\s*(\w+:)?Alignment[\s>]/.test(xml) && !/<\s*(\w+:)?Surface[\s>]/.test(xml)) {
+  if (!/<\s*(\w+:)?Alignment[\s>]/.test(xml) && !/<\s*(\w+:)?Surface[\s>]/.test(xml)
+      && !/<\s*(\w+:)?PlanFeature[\s>]/.test(xml)) {
     return {
       ok: false,
       code: "NoAlignments",
@@ -180,6 +187,11 @@ export function parseSurfaces(doc: Document, toFt = 1): Tin[] {
   return out;
 }
 
+/** Sections for the surface-only path, where the unit is resolved locally. */
+function parseSectionsHere(doc: Document): DesignSectionSurface[] {
+  return parseDesignSections(doc, detectUnit(doc) === "meter" ? FT_PER_M : 1, byLocalName);
+}
+
 export function parseLandXML(xml: string): ImportResult {
   const early = preflight(xml);
   if (early) return early;
@@ -202,8 +214,13 @@ export function parseLandXML(xml: string): ImportResult {
   if (alignmentEls.length === 0) {
     // A surface-only file is a perfectly good import: it is the ground the road
     // will sit on, which is exactly what this app was missing.
-    const onlySurfaces = parseSurfaces(doc, detectUnit(doc) === "meter" ? FT_PER_M : 1);
-    if (onlySurfaces.length > 0) return { ok: true, alignments: [], surfaces: onlySurfaces };
+    const localToFt = detectUnit(doc) === "meter" ? FT_PER_M : 1;
+    const onlyFeatures = parsePlanFeatures(doc, localToFt, byLocalName);
+    const onlySurfaces = parseSurfaces(doc, localToFt);
+    if (onlySurfaces.length > 0 || onlyFeatures.features.length > 0) {
+      return { ok: true, alignments: [], surfaces: onlySurfaces,
+        designSections: parseSectionsHere(doc), planFeatures: onlyFeatures };
+    }
     return {
       ok: false,
       code: "NoAlignments",
@@ -372,5 +389,7 @@ export function parseLandXML(xml: string): ImportResult {
     return { ok: false, code: "NoUsableAlignment",
       detail: "Alignments were present but none carried geometry this reader could use." };
   }
-  return { ok: true, alignments: out, surfaces: parseSurfaces(doc, toFt) };
+  return { ok: true, alignments: out, surfaces: parseSurfaces(doc, toFt),
+    designSections: parseDesignSections(doc, toFt, byLocalName),
+    planFeatures: parsePlanFeatures(doc, toFt, byLocalName) };
 }

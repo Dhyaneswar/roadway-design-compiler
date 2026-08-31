@@ -4,7 +4,8 @@
 
 import { parseRoadDesign } from "../schema/validate";
 import { computeHorizontal } from "../kernel/horizontal";
-import type { HorizontalElement, RoadDesign, SuperelevationSpec } from "../schema/road-design";
+import type { HorizontalElement, RoadDesign, SegmentMaterial, SuperelevationSpec } from "../schema/road-design";
+import type { RoadsideItem } from "../schema/roadside";
 
 export interface FormElementRow {
   kind: "tangent" | "arc" | "deflection";
@@ -25,6 +26,8 @@ export interface FormSegmentRow {
   name: string;
   width: string;
   slopePercent: string;
+  /** Authored material. Absent means unstated, which is drawn neutrally. */
+  material?: SegmentMaterial;
 }
 
 export interface FormTemplateRow {
@@ -55,6 +58,8 @@ export interface StudioForm {
   drops: FormDropRow[];
   /** Optional banking policy. Absent = template cross slopes everywhere. */
   superelevation?: SuperelevationSpec;
+  /** Authored roadside furniture. */
+  roadside?: RoadsideItem[];
 }
 
 function num(raw: string | undefined, label: string): number {
@@ -128,6 +133,7 @@ export function formToDesign(form: StudioForm): RoadDesign {
         name: s.name.trim() || `seg${si + 1}`,
         width: num(s.width, `${tLabel} ${side} segment ${si + 1} width`),
         slopePercent: num(s.slopePercent, `${tLabel} ${side} segment ${si + 1} slope`),
+        ...(s.material ? { material: s.material } : {}),
       }));
     templates[name] = { name, left: mapSide("left"), right: mapSide("right") };
   });
@@ -162,6 +168,7 @@ export function formToDesign(form: StudioForm): RoadDesign {
 
   return parseRoadDesign({
     ...(form.superelevation ? { superelevation: form.superelevation } : {}),
+    ...(form.roadside && form.roadside.length > 0 ? { roadside: form.roadside } : {}),
     name: form.name || "Unnamed Road",
     alignment: {
       beginStation: form.beginStation,

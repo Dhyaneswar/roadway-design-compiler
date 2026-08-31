@@ -23,7 +23,7 @@ the agent do?"* — it is:
 This app draws that line and enforces it:
 
 - An agent can design an entire road — geometry, vertical profile, cross sections,
-  superelevation — through 31 WebMCP tools.
+  superelevation — through 37 WebMCP tools.
 - Every change it applies is stamped **agent-proposed** and held for confirmation.
 - **The LandXML deliverable is refused while anything is unconfirmed**, and there is
   deliberately **no tool that clears that**. Confirmation happens in the UI, by a person.
@@ -44,8 +44,11 @@ instead of hoped for in a system prompt.
 | **Edit** | project setup, horizontal elements, PVIs, template segments and drops, superelevation |
 | **Undo** | `undo_last_change` — reverts the agent's own unconfirmed work, and refuses once a human has confirmed it |
 | **Deliver** | `export_landxml` and `export_staking_csv` — both gated on human confirmation |
-| **Ingest** | `import_landxml` — an alignment somebody else drew, and the ground it runs over |
+| **Ingest** | `import_landxml` — an alignment somebody else drew, the ground it runs over, and the sections its designer produced |
+| **Reference** | `read_design_sections` — the original designer's pavement structure, held apart from your own |
+| **Context** | `read_site_features` — the existing site: buildings, kerbs, sidewalks, lot lines |
 | **Ground** | `read_ground` / `read_terrain_extent` — cut and fill against a surveyed surface |
+| **Dress** | `set_segment_material` and `place_roadside_item` — what the road is made of, and the guardrail, barrier, curb and markings on it |
 | **Hand off** | `read_design_document` / `load_design_document` — the whole design in a link |
 | **Georeference** | `set_coordinate_system` / `read_coordinate_systems` — what places the LandXML in the world |
 
@@ -162,6 +165,86 @@ Sampling is indexed rather than scanned — a uniform grid over the triangles, b
 in 6 ms for 15,067 faces, so a mile of road samples in under a millisecond instead
 of running hundreds of millions of point-in-triangle tests.
 
+
+### Authored, not decorated
+
+The 3D view draws asphalt as asphalt and gravel as gravel, puts an edge line where
+pavement meets something that is not, and stands a guardrail up where one was
+placed. None of it is inferred.
+
+⛔ **Material is never guessed from a segment's name.** A shoulder is asphalt on one
+project and gravel on the next; a segment with no stated material is drawn neutrally
+rather than characterised.
+
+⛔ **Roadside furniture is never placed by the tool.** LandXML carries no guardrail,
+so it would have been easy to conclude that drawing one is always invention. That is
+the wrong line — the distinction is **authored versus invented**, not existing versus
+new. A guardrail an engineer placed from 20+00 to 34+00, left side, 20 ft offset is
+design data, and a tool that cannot author it is not a design tool.
+
+What it still refuses to do is decide whether a guardrail is **warranted** — that
+depends on fill height, side slope and clear zone, and is the judgement a licensed
+engineer is paid to make:
+
+```
+place_roadside_item  gr-left-1   guardrail left 2000-3400 at 20 ft   -> 1400 ft
+                     off the end of the alignment  -> RoadsideOutsideAlignment
+                     a signed offset               -> RoadsideOffsetNotPositive
+                     a marking with no pattern     -> MarkingPatternUnstated
+
+read_roadside        guardrail          1 item   1400 ft
+                     concrete-barrier   1 item   1000 ft
+                     pavement-marking   1 item   5225 ft
+```
+
+That last block is a quantity take-off — count and length by kind, which is what
+goes on a bid schedule.
+
+
+### The original designer's pavement
+
+A LandXML out of real design software often carries the sections its designer
+actually produced — not a template to sweep, but finished surfaces station by
+station. `import_landxml` reads them and holds them as **reference**, drawn
+translucent so they can never be mistaken for the corridor this app sweeps:
+
+```
+surface        stations    width(ft)   roadway?
+Teoretisk           221      38.553    YES - pavement
+Slitlager           221      38.553    YES - pavement     (the wearing course)
+Terrace             221      135.13    YES - pavement
+Berg                220    5591.528    no  - ground
+Jord                221   10208.404    no  - ground
+```
+
+⭐ **That classification is a width test, not a reading of the names** — which are
+Swedish on this file, and will be something else on the next one.
+
+⛔ They are deliberately not merged into the design. Merging would quietly replace
+the engineer's model with somebody else's and make the two impossible to tell apart.
+
+
+### The site that is already there
+
+A survey LandXML carries what exists. `import_landxml` reads it and draws it as
+context, so a new alignment can be placed in a real site rather than in space:
+
+```
+71 features · 547 points · 0 unresolved references
+site extent  N 4844..5566   E 4975..6125 ft
+  EP (edge of pavement) · SDWK (sidewalk) · SHD (shoulder)
+  BLDG (building) · LOT · TC (top of curb)
+```
+
+⚠ **Most survey geometry is written as point REFERENCES, not coordinates** — 1,470
+`pntRef` against 72 inline pairs on the file this was measured against. A reader
+handling only inline coordinates would import 5% of the site and look like it
+worked, which is worse than importing none.
+
+⛔ Feature names are carried exactly as written and never interpreted. `BLDG1|1094`
+is a building on this survey and could be anything on the next; the grouping in the
+summary is a label taken from the file's own separator, not a classification.
+
 ## Design criteria without redistributing a standard
 
 Minimum-radius and K-value tables live in the AASHTO Green Book, a copyrighted
@@ -188,7 +271,7 @@ gets its own answers. Every verdict reports the basis it used.
 
 ```bash
 npm install
-npm test               # 276 tests
+npm test               # 324 tests
 npm run studio         # http://localhost:5173
 npx vite build studio  # production build → studio/dist
 ```
@@ -214,6 +297,8 @@ node scripts/verify-new-tools.mjs       # undo, alternatives, and the staking ga
 node scripts/verify-handoff.mjs         # survives reload; a link opens in a SECOND browser
 node scripts/verify-import-live.mjs     # an agent imports a real third-party LandXML
 node scripts/verify-terrain.mjs         # ground imported, drawn, and cut/fill computed
+node scripts/verify-roadside.mjs        # materials, furniture, refusals, quantities
+node scripts/verify-design-sections.mjs # the designer's own sections, read and drawn
 node scripts/verify-live.mjs            # the whole story against the deployed URL
 node scripts/rehearse-video.mjs         # walks the demo beat by beat, screenshots each
 ```
@@ -224,7 +309,7 @@ node scripts/rehearse-video.mjs         # walks the demo beat by beat, screensho
 src/schema/      RoadDesign document + zod validation (cross-field rules live here)
 src/kernel/      horizontal · vertical · corridor · template-section · criteria ·
                  superelevation · terrain — pure, deterministic, golden-tested
-src/importers/   LandXML 1.1 / 1.2 reader
+src/importers/   LandXML 1.1 / 1.2 reader — alignments, TIN surfaces, as-designed sections
 src/exporters/   LandXML 1.2 (ORD-hardened) and construction staking CSV
 src/studio/      WebMCP bridge · typed refusals · agent change ledger · activity log ·
                  design alternatives · portable design document
