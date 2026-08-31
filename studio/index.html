@@ -144,6 +144,11 @@
       border-radius: 6px; background: #2f7fb8; color: #f2f8fc; font-size: 12.5px;
       font-weight: 600; cursor: pointer; }
     #agentAlternatives .alt-adopt:hover { background: #3a97d8; }
+  
+    /* import control */
+    .import-lx { font-size: 12px; color: var(--accent); cursor: pointer;
+      border: 1px solid var(--line); border-radius: 6px; padding: 6px 11px; }
+    .import-lx input { display: none; }
   </style>
 </head>
 <body>
@@ -233,6 +238,7 @@
         <button class="primary" id="download">Download LandXML for ORD</button>
         <button id="downloadStaking">Download staking CSV</button>
         <button id="shareLink">Copy shareable link</button>
+        <label class="import-lx">Import LandXML<input type="file" id="importLandxml" accept=".xml,.landxml" /></label>
         <label class="stake-int">every <input id="stakeInterval" value="25" /> ft</label>
         <span id="status"></span>
       </div>

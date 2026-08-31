@@ -23,7 +23,7 @@ the agent do?"* — it is:
 This app draws that line and enforces it:
 
 - An agent can design an entire road — geometry, vertical profile, cross sections,
-  superelevation — through 28 WebMCP tools.
+  superelevation — through 31 WebMCP tools.
 - Every change it applies is stamped **agent-proposed** and held for confirmation.
 - **The LandXML deliverable is refused while anything is unconfirmed**, and there is
   deliberately **no tool that clears that**. Confirmation happens in the UI, by a person.
@@ -44,6 +44,8 @@ instead of hoped for in a system prompt.
 | **Edit** | project setup, horizontal elements, PVIs, template segments and drops, superelevation |
 | **Undo** | `undo_last_change` — reverts the agent's own unconfirmed work, and refuses once a human has confirmed it |
 | **Deliver** | `export_landxml` and `export_staking_csv` — both gated on human confirmation |
+| **Ingest** | `import_landxml` — an alignment somebody else drew, and the ground it runs over |
+| **Ground** | `read_ground` / `read_terrain_extent` — cut and fill against a surveyed surface |
 | **Hand off** | `read_design_document` / `load_design_document` — the whole design in a link |
 | **Georeference** | `set_coordinate_system` / `read_coordinate_systems` — what places the LandXML in the world |
 
@@ -106,6 +108,60 @@ About 1.3 KB for a typical road. Everything after `#` stays in the browser and i
 infrastructure on the way. No account, no upload, no backend. Open the link in a
 different browser and you get exactly the design that was sent.
 
+
+### Reading a road somebody else drew
+
+Export was a one-way door, which capped this at greenfield work — every practising
+engineer already has alignments. `import_landxml` reads them.
+
+Three decisions, each made the robust way:
+
+- **Geometry comes from the coordinates, not from `dir`.** Measured against a real
+  public file, `dir="2.238999"` is *radians*; other writers emit degrees, and the
+  Units block does not always say which. Start/End/Center points are unambiguous.
+- **An unsupported element is a refusal, never an approximation.** Spirals appear in
+  3 of the 5 real alignments tested here. This kernel does not model them, so such a
+  file is refused *with the count* — quietly dropping a spiral changes the geometry
+  of a road somebody is going to build.
+- **The expensive files are refused before a DOM is built.** Two OpenRoads exports
+  here are 19.7 MB and 31.1 MB — 504,000 and 822,000 elements of TIN surface, with no
+  alignment at all. A substring pre-scan answers that in milliseconds instead of
+  taking the tab down.
+
+Run it against your own files:
+
+```bash
+npx tsx scripts/try-import.mjs <file-or-directory>
+```
+
+Against the 12 public samples available here: **2 imported, 10 refused, every refusal
+naming its reason.**
+
+
+### The road on the ground
+
+A design surface floating in space is a drawing. Tied to ground it becomes
+engineering. `import_landxml` reads the TIN surface out of the same file as the
+alignment, draws it under the road in 3D, and `read_ground` reports what it costs:
+
+```
+surface "Landscape_road": 15,067 triangles, 7,664 points
+131 stations · max cut 18.35 ft · max fill 7.11 ft · 9 balance points
+  sta      0   ground  72.89   design  74.53   FILL 1.64 ft
+  sta    100   ground  75.93   design  74.06   CUT  1.86 ft
+```
+
+Sign convention, stated because getting it backwards inverts an estimate:
+**positive is fill**, the road above ground; **negative is cut**, below it.
+
+⛔ A station that falls outside the surveyed surface reports **no ground**, not a
+guess. A road can run past the edge of a survey, and inventing ground there is how
+a design gets built wrong.
+
+Sampling is indexed rather than scanned — a uniform grid over the triangles, built
+in 6 ms for 15,067 faces, so a mile of road samples in under a millisecond instead
+of running hundreds of millions of point-in-triangle tests.
+
 ## Design criteria without redistributing a standard
 
 Minimum-radius and K-value tables live in the AASHTO Green Book, a copyrighted
@@ -132,7 +188,7 @@ gets its own answers. Every verdict reports the basis it used.
 
 ```bash
 npm install
-npm test               # 248 tests
+npm test               # 276 tests
 npm run studio         # http://localhost:5173
 npx vite build studio  # production build → studio/dist
 ```
@@ -156,6 +212,8 @@ node scripts/verify-seal.mjs            # export refused until a human confirms
 node scripts/verify-parity.mjs          # a human can author everything an agent can
 node scripts/verify-new-tools.mjs       # undo, alternatives, and the staking gate
 node scripts/verify-handoff.mjs         # survives reload; a link opens in a SECOND browser
+node scripts/verify-import-live.mjs     # an agent imports a real third-party LandXML
+node scripts/verify-terrain.mjs         # ground imported, drawn, and cut/fill computed
 node scripts/verify-live.mjs            # the whole story against the deployed URL
 node scripts/rehearse-video.mjs         # walks the demo beat by beat, screenshots each
 ```
@@ -165,7 +223,8 @@ node scripts/rehearse-video.mjs         # walks the demo beat by beat, screensho
 ```
 src/schema/      RoadDesign document + zod validation (cross-field rules live here)
 src/kernel/      horizontal · vertical · corridor · template-section · criteria ·
-                 superelevation — pure, deterministic, golden-tested
+                 superelevation · terrain — pure, deterministic, golden-tested
+src/importers/   LandXML 1.1 / 1.2 reader
 src/exporters/   LandXML 1.2 (ORD-hardened) and construction staking CSV
 src/studio/      WebMCP bridge · typed refusals · agent change ledger · activity log ·
                  design alternatives · portable design document
@@ -185,8 +244,8 @@ reproduced the curve table to 0.01 ft. See `corpus/s1-spike-log.md`.
 
 - Conceptual design tooling. **Not for construction.** Every design requires review
   and sealing by a licensed Professional Engineer.
-- No existing-ground surface, so no cut/fill or earthwork quantities. The corridor is
-  a design surface, not a tie to ground.
+- Earthwork is reported as cut and fill depth per station, not as volumes. Volumes need
+  end-area computation across the full template, which this does not do yet.
 - The criteria defaults are illustrative, not an adopted standard.
 
 ## Licence

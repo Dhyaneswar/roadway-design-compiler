@@ -12,6 +12,9 @@ import { AgentChangeLedger } from "../src/studio/agent-changes";
 import { AgentActivityLog, classifyResult } from "../src/studio/agent-activity";
 import { AlternativeSet, evaluateAlternatives, type AlternativeInput } from "../src/studio/alternatives";
 import { autosave, decodeFragment, loadAutosave, shareUrl } from "../src/studio/design-document";
+import { parseLandXML } from "../src/importers/landxml";
+import { TinSampler, sampleGround, summariseEarthwork, type Tin } from "../src/kernel/terrain";
+import { sampleAlignment as sampleAlign } from "../src/kernel/sample";
 import { transitionFor } from "../src/kernel/superelevation";
 import { sampleAlignment, sampleProfile } from "../src/kernel/sample";
 import { azimuthToBearing, degreesToDms } from "../src/util/angle";
@@ -59,6 +62,39 @@ const agentLog = new AgentActivityLog();
 // Alternatives an agent has put on the table. Nothing here is applied until a
 // person picks one -- choosing between defensible options is the engineer's job.
 const alternatives = new AlternativeSet();
+// Existing ground. Undefined until a LandXML surface is imported; the design
+// works without it, it just cannot say anything about cut and fill.
+let terrain: Tin | undefined;
+let terrainSampler: TinSampler | undefined;
+
+function setTerrain(tin: Tin | undefined): void {
+  terrain = tin;
+  terrainSampler = tin ? new TinSampler(tin) : undefined;
+  viewer?.setTerrain(tin);
+  refresh();
+}
+
+/**
+ * Ground under the alignment, station by station.
+ *
+ * Sampling density is capped: a long road at a tight interval is thousands of
+ * point-in-triangle tests per keystroke, and the answer does not get better.
+ */
+function groundProfile(design: RoadDesign, intervalFt = 50) {
+  if (!terrainSampler) return undefined;
+  const h = computeHorizontal(design.alignment);
+  const v = computeVertical(design.profile);
+  const begin = design.alignment.beginStation;
+  const count = Math.min(400, Math.max(2, Math.ceil(h.length / intervalFt)));
+  const pts = sampleAlign(design.alignment, count);
+  return sampleGround(
+    terrainSampler,
+    pts.map((p, i) => {
+      const station = begin + (h.length * i) / (pts.length - 1 || 1);
+      return { station, n: p.n, e: p.e, designZ: v.elevationAt(station) };
+    }),
+  );
+}
 
 function readForm(): StudioForm {
   return {
@@ -913,6 +949,15 @@ const registeredTools = registerWebMcp({
     renderAgentLog();
     return { ok: true as const, description: r.change.description };
   },
+  terrain: () => terrain,
+  setTerrain,
+  groundProfile: (intervalFt) => {
+    try {
+      return groundProfile(formToDesign(readForm()), intervalFt ?? 50);
+    } catch {
+      return undefined; // an invalid design has no ground profile to report
+    }
+  },
   shareLink: () => shareUrl(readForm(), window.location.href),
   setCrs,
   crsZones,
@@ -989,7 +1034,7 @@ function switchView(to3d: boolean): void {
   $("view3d").style.display = to3d ? "flex" : "none";
   $("btnViewDesign").classList.toggle("active", !to3d);
   $("btnView3d").classList.toggle("active", to3d);
-  if (to3d) activate3d();
+  if (to3d) { activate3d(); viewer?.setTerrain(terrain); }
   else viewer?.setActive(false);
 }
 $("btnViewDesign").addEventListener("click", () => switchView(false));
@@ -1156,6 +1201,61 @@ for (const id of ["supEnabled", "supSpeed", "supEmax", "supNc", "supGrad"]) {
     /* a bad restore must not take the app down; the seeded design stands */
   }
 })();
+
+// Parity: the agent has import_landxml, so the engineer has this.
+$("importLandxml").addEventListener("change", (ev) => {
+  const input = ev.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  const status = $("status");
+  void file.text().then((xml) => {
+    const parsed = parseLandXML(xml);
+    if (!parsed.ok) {
+      status.innerHTML = `<span class="err">${parsed.code}: ${parsed.detail}</span>`;
+      input.value = "";
+      return;
+    }
+    if (parsed.surfaces.length > 0) setTerrain(parsed.surfaces[0]!);
+    const a = parsed.alignments[0];
+    if (!a) {
+      status.innerHTML =
+        `<span class="ok">\u2713 loaded ground surface "${parsed.surfaces[0]?.name ?? ""}" ` +
+        `(${parsed.surfaces[0]?.faces.length ?? 0} triangles)</span>`;
+      input.value = "";
+      return;
+    }
+    const pvis = a.pvis.length >= 2
+      ? a.pvis.map((v) => ({
+          station: String(v.station), elevation: String(v.elevation),
+          ...(v.curveLength !== undefined ? { curveLength: String(v.curveLength) } : {}),
+        }))
+      : [{ station: String(a.beginStation), elevation: "0" },
+         { station: String(a.beginStation + 1), elevation: "0" }];
+    restoreForm({
+      name: a.name,
+      beginStation: a.beginStation,
+      startE: a.start.e,
+      startN: a.start.n,
+      startAzimuthDeg: a.startAzimuthDeg,
+      elements: a.elements.map((el) =>
+        el.type === "tangent"
+          ? { kind: "tangent" as const, length: String(el.length) }
+          : el.type === "arc"
+            ? { kind: "arc" as const, radius: String(el.radius),
+                deltaDeg: String(el.deltaDeg), direction: el.direction }
+            : { kind: "deflection" as const, deflectionDeg: String(el.deflectionDeg),
+                direction: el.direction }),
+      pvis,
+      templates,
+      drops,
+    });
+    const extra = parsed.alignments.length > 1
+      ? ` (${parsed.alignments.length} alignments in the file; took the first)` : "";
+    status.innerHTML =
+      `<span class="ok">\u2713 imported "${a.name}"${extra}</span>`;
+    input.value = "";
+  });
+});
 
 $("shareLink").addEventListener("click", () => {
   const url = shareUrl(readForm(), window.location.href);

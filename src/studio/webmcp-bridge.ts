@@ -32,6 +32,8 @@ import { AiDesignProposal, proposalToForm } from "./ai-design";
 import { toStakingCsv, stakingRows } from "../exporters/staking";
 import { evaluateAlternatives, type AlternativeInput } from "./alternatives";
 import { fromDocument, toDocument } from "./design-document";
+import { parseLandXML } from "../importers/landxml";
+import { summariseEarthwork, type GroundSample, type Tin } from "../kernel/terrain";
 import { isRefusal, tryBuild, type Refusal } from "./webmcp-refusals";
 
 export const AGENT_PROVENANCE = "agent-proposed; awaiting engineer confirmation";
@@ -82,6 +84,12 @@ export interface StudioHost {
   onToolCall?(tool: string, result: unknown): void;
   /** Undo the most recent agent change. The host owns the history. */
   undoLastAgentChange(): { ok: true; description: string } | { ok: false; reason: string };
+  /** The imported ground surface, if one has been loaded. */
+  terrain(): Tin | undefined;
+  /** Load or clear the ground surface. */
+  setTerrain(tin: Tin | undefined): void;
+  /** Ground against the design along the alignment, or undefined with no terrain. */
+  groundProfile(intervalFt?: number): GroundSample[] | undefined;
   /** A link that reproduces the current design exactly. */
   shareLink(): string;
   /** Set the coordinate reference system by zone key, e.g. GA-West. */
@@ -225,6 +233,9 @@ const ANNOTATIONS: Readonly<Record<string, WebMcpToolAnnotations>> = {
   read_design_document: { title: "Save or share the design", readOnlyHint: true, idempotentHint: true },
   read_coordinate_systems: { title: "List coordinate systems", readOnlyHint: true, idempotentHint: true },
   load_design_document: { title: "Load a design", readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+  import_landxml: { title: "Import a LandXML alignment", readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+  read_ground: { title: "Read cut and fill", readOnlyHint: true, idempotentHint: true },
+  read_terrain_extent: { title: "Read the ground extent", readOnlyHint: true, idempotentHint: true },
   set_coordinate_system: { title: "Set the coordinate system", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   propose_alternatives: { title: "Offer the engineer options", readOnlyHint: true, idempotentHint: true },
   undo_last_change: { title: "Undo your last change", readOnlyHint: false, destructiveHint: false, idempotentHint: false },
@@ -735,6 +746,197 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
       "The CRS georeferences the LandXML export.",
     S.obj({}),
     () => ({ available: host.crsZones(), selected: host.readCrs() ?? null }),
+  );
+
+  add(
+    "import_landxml",
+    "Read an existing alignment out of a LandXML file and load it as the design. This is how a " +
+      "road that already exists -- in OpenRoads, in Civil 3D, in a survey deliverable -- gets in " +
+      "here, instead of starting from scratch. " +
+      "Give it the file's text. If the file holds several alignments, name the one you want or " +
+      "take the first. " +
+      "\u26d4 DESTRUCTIVE: this replaces the current design. Preview first (omit commit). " +
+      "\u26d4 It REFUSES rather than approximating: a file using spiral transitions is rejected " +
+      "with the count, because this kernel models tangents and circular curves only and quietly " +
+      "dropping a spiral would change the geometry of a road somebody is going to build. " +
+      "Metric files are converted to US survey feet and say so.",
+    S.obj({
+      xml: S.str("The full text of the LandXML file."),
+      alignmentName: S.str("Optional. Which alignment to take when the file holds several."),
+      commit: S.commit,
+    }, ["xml"]),
+    (args) => {
+      const xml = typeof args.xml === "string" ? args.xml : "";
+      if (xml.trim() === "") {
+        return { error: true, code: "BadArgument", detail: "xml must be the text of a LandXML file." };
+      }
+      const parsed = parseLandXML(xml);
+      if (!parsed.ok) {
+        return {
+          refused: true,
+          code: parsed.code,
+          detail: parsed.detail,
+          measurements: parsed.measurements ?? {},
+          resolvedBy: [],
+          authority: ["LandXML 1.1 / 1.2"],
+        };
+      }
+      if (parsed.alignments.length === 0 && parsed.surfaces.length > 0) {
+        const tin = parsed.surfaces[0]!;
+        host.setTerrain(tin);
+        return {
+          committed: true,
+          change: `loaded ground surface "${tin.name}"`,
+          groundSurface: { name: tin.name, triangles: tin.faces.length, points: tin.points.length },
+          provenance: AGENT_PROVENANCE,
+          note: "That file carried ground but no alignment. The surface is loaded; cut and fill " +
+            "can now be read with read_ground.",
+        };
+      }
+
+      const wanted = typeof args.alignmentName === "string" ? args.alignmentName : undefined;
+      const picked = wanted
+        ? parsed.alignments.find((a) => a.name === wanted)
+        : parsed.alignments[0];
+      if (!picked) {
+        return {
+          refused: true,
+          code: "AlignmentNotInFile",
+          detail: `That file has no alignment called "${String(wanted)}".`,
+          measurements: { alignmentCount: parsed.alignments.length },
+          available: parsed.alignments.map((a) => a.name),
+          resolvedBy: ["import_landxml"],
+          authority: ["LandXML 1.1 / 1.2"],
+        };
+      }
+
+      if (parsed.surfaces.length > 0) host.setTerrain(parsed.surfaces[0]!);
+
+      const current = host.readForm();
+      // A profile must span the alignment; an imported file often carries none, or
+      // one stationed differently. Rather than refuse the whole import, seed a flat
+      // profile at the imported extents and say so -- the engineer then authors the
+      // real one, which is the honest division of labour.
+      const pvis = picked.pvis.length >= 2
+        ? picked.pvis.map((v) => ({
+            station: String(v.station),
+            elevation: String(v.elevation),
+            ...(v.curveLength !== undefined ? { curveLength: String(v.curveLength) } : {}),
+          }))
+        : [
+            { station: String(picked.beginStation), elevation: "0" },
+            { station: String(picked.beginStation + 1), elevation: "0" },
+          ];
+
+      const next: StudioForm = {
+        name: picked.name,
+        beginStation: picked.beginStation,
+        startE: picked.start.e,
+        startN: picked.start.n,
+        startAzimuthDeg: picked.startAzimuthDeg,
+        elements: picked.elements.map((el) =>
+          el.type === "tangent"
+            ? { kind: "tangent" as const, length: String(el.length) }
+            : el.type === "arc"
+              ? { kind: "arc" as const, radius: String(el.radius),
+                  deltaDeg: String(el.deltaDeg), direction: el.direction }
+              : { kind: "deflection" as const, deflectionDeg: String(el.deflectionDeg),
+                  direction: el.direction }),
+        pvis,
+        // The engineer's typical sections are theirs; a LandXML alignment carries none.
+        templates: current.templates,
+        drops: current.drops,
+      };
+
+      const result = applyOrPreview(host, next, args.commit === true,
+        `imported "${picked.name}" from LandXML`);
+      return isRefusal(result) ? result : {
+        ...(result as object),
+        importedFrom: {
+          alignmentName: picked.name,
+          alignmentsInFile: parsed.alignments.map((a) => a.name),
+          sourceUnit: picked.sourceUnit,
+          elementCount: picked.elements.length,
+          pviCount: picked.pvis.length,
+          notes: [
+            ...picked.notes,
+            ...(picked.pvis.length < 2
+              ? ["the file carried no usable profile; a flat placeholder was seeded, author the real one"]
+              : []),
+            "cross-section templates are yours, not the file's -- LandXML alignments carry none",
+          ],
+        },
+      };
+    },
+  );
+
+  add(
+    "read_ground",
+    "Read the existing ground under the road: for each station, the ground elevation, the design " +
+      "elevation, and the difference. POSITIVE is FILL (the road sits above ground), NEGATIVE is " +
+      "CUT (it sits below). Also returns the extremes and the balance points where the road " +
+      "crosses ground level. " +
+      "Stations that fall outside the surveyed surface report no ground rather than a guess -- a " +
+      "road can run past the edge of a survey, and inventing ground there is how a design gets " +
+      "built wrong. Requires a ground surface: import one with import_landxml.",
+    S.obj({
+      intervalFt: S.num("Station interval to sample at. Default 50."),
+    }),
+    () => {
+      const tin = host.terrain();
+      if (!tin) {
+        return {
+          refused: true,
+          code: "NoGroundSurface",
+          detail:
+            "No existing ground has been loaded. Import a LandXML containing a TIN surface with " +
+            "import_landxml; cut and fill cannot be computed against nothing.",
+          measurements: {},
+          resolvedBy: ["import_landxml"],
+          authority: ["Existing ground"],
+        };
+      }
+      const samples = host.groundProfile();
+      if (!samples) {
+        return { error: true, code: "BridgeFault", detail: "ground could not be sampled" };
+      }
+      const summary = summariseEarthwork(samples);
+      return {
+        surface: { name: tin.name, triangles: tin.faces.length, points: tin.points.length },
+        ...summary,
+        note: summary.offSurface > 0
+          ? `${summary.offSurface} of ${summary.sampled} stations fall outside the surveyed ` +
+            `surface and report no ground.`
+          : "Every station sits on the surveyed surface.",
+        samples: samples.filter((s) => s.cutFillFt !== undefined).slice(0, 60),
+      };
+    },
+  );
+
+  add(
+    "read_terrain_extent",
+    "Read the bounds of the loaded ground surface, and whether the alignment sits inside it. " +
+      "Use this before reasoning about cut and fill: a road that leaves the survey has no ground " +
+      "to be compared against for part of its length.",
+    S.obj({}),
+    () => {
+      const tin = host.terrain();
+      if (!tin) return { loaded: false, note: "No ground surface. Import one with import_landxml." };
+      const b = tin.bounds;
+      const samples = host.groundProfile();
+      const off = samples ? samples.filter((s) => s.groundZ === undefined).length : undefined;
+      return {
+        loaded: true,
+        name: tin.name,
+        triangles: tin.faces.length,
+        points: tin.points.length,
+        boundsFt: {
+          northing: [b.minN, b.maxN], easting: [b.minE, b.maxE], elevation: [b.minZ, b.maxZ],
+        },
+        stationsOffSurface: off,
+        alignmentFullyOnSurface: off === 0,
+      };
+    },
   );
 
   add(

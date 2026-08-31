@@ -11,12 +11,16 @@ import { computeCorridor } from "../src/kernel/corridor";
 import { buildCorridorMesh, type CorridorMesh } from "../src/viewer/corridor-mesh";
 import { fmtSta } from "../src/util/station";
 import type { RoadDesign } from "../src/schema/road-design";
+import type { Tin } from "../src/kernel/terrain";
 
 const SECTION_INTERVAL_FT = 25;
 
 export interface Viewer3D {
   /** Recompute the corridor and rebuild the scene. Throws on kernel errors. */
   update(design: RoadDesign): void;
+  /** Show existing ground under the road, or pass undefined to remove it.
+   *  Redrawn on the next update() so it shares the corridor's origin. */
+  setTerrain(tin: Tin | undefined): void;
   /** Vertical exaggeration (y scale). 1 = true scale. */
   setExaggeration(factor: number): void;
   /** Start/stop the render loop (stop when the view is hidden). */
@@ -95,8 +99,60 @@ export function createViewer(
   const group = new THREE.Group();
   scene.add(group);
   let exaggeration = 1;
+let terrainTin: Tin | undefined;
+let terrainMesh: THREE.Mesh | undefined;
+
+/** Earth-toned, matte, and drawn slightly back so the road reads on top of it. */
+const terrainMaterial = new THREE.MeshStandardMaterial({
+  color: 0x6b6a52,
+  roughness: 1,
+  metalness: 0,
+  side: THREE.DoubleSide,
+  flatShading: true,
+  polygonOffset: true,
+  polygonOffsetFactor: 1,
+  polygonOffsetUnits: 1,
+});
+
+/**
+ * Build the ground mesh in the corridor's own local frame.
+ *
+ * Uses the SAME origin as the road: a terrain drawn about its own centre would
+ * float somewhere else entirely, which looks like a rendering bug and is really a
+ * coordinate one. Points far from the road are dropped -- a survey often covers
+ * far more ground than the alignment touches, and drawing all of it shrinks the
+ * road to a speck.
+ */
+function buildTerrainMesh(tin: Tin, origin: { e: number; n: number; z: number }, reachFt: number)
+  : THREE.Mesh | undefined {
+  const keep = new Int32Array(tin.points.length).fill(-1);
+  const pos: number[] = [];
+  let kept = 0;
+  for (let i = 0; i < tin.points.length; i += 1) {
+    const p = tin.points[i]!;
+    if (Math.hypot(p.e - origin.e, p.n - origin.n) > reachFt) continue;
+    keep[i] = kept++;
+    pos.push(p.e - origin.e, p.z - origin.z, -(p.n - origin.n));
+  }
+  if (kept < 3) return undefined;
+
+  const idx: number[] = [];
+  for (const f of tin.faces) {
+    const a = keep[f[0]]!, b2 = keep[f[1]]!, c = keep[f[2]]!;
+    if (a < 0 || b2 < 0 || c < 0) continue;
+    idx.push(a, b2, c);
+  }
+  if (idx.length === 0) return undefined;
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return new THREE.Mesh(geo, terrainMaterial);
+}
   let fitted = false;
-  let meshData: CorridorMesh | null = null;
+  let lastDesignForTerrain: RoadDesign | undefined;
+let meshData: CorridorMesh | null = null;
   let roadMesh: THREE.Mesh | null = null;
   let snapPoints: THREE.Points | null = null;
 
@@ -273,7 +329,12 @@ export function createViewer(
   });
 
   return {
+    setTerrain(tin: Tin | undefined): void {
+      terrainTin = tin;
+      if (meshData) this.update(lastDesignForTerrain ?? (undefined as unknown as RoadDesign));
+    },
     update(design: RoadDesign): void {
+      if (design) lastDesignForTerrain = design;
       const mesh = buildCorridorMesh(computeCorridor(design, SECTION_INTERVAL_FT));
       meshData = mesh;
       clearGroup();
@@ -310,6 +371,23 @@ export function createViewer(
       );
       roadMesh = new THREE.Mesh(geo, roadMaterials);
       group.add(roadMesh);
+
+      // Ground goes in last, in the road's frame, reaching a little past the
+      // corridor so the road is seen sitting in the landscape rather than on a
+      // postage stamp of it.
+      if (terrainTin) {
+        // Reach is derived from how far the road actually runs from its origin,
+        // rather than a fixed radius that would be wrong at either scale.
+        let far = 0;
+        for (let i = 0; i < meshData.centerline.length; i += 3) {
+          far = Math.max(far, Math.hypot(meshData.centerline[i]!, meshData.centerline[i + 2]!));
+        }
+        const reach = Math.max(600, far * 1.35);
+        terrainMesh = buildTerrainMesh(terrainTin, meshData.origin, reach);
+        if (terrainMesh) group.add(terrainMesh);
+      } else {
+        terrainMesh = undefined;
+      }
 
       group.add(new THREE.LineSegments(new THREE.WireframeGeometry(geo), edgeMaterial));
 
