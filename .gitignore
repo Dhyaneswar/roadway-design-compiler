@@ -3,6 +3,3 @@ out/
 *.tsbuildinfo
 .gstack/
 studio/dist/
-
-# Submission strategy notes — kept local, not part of the product
-SUBMISSION.md

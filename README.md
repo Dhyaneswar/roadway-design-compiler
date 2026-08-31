@@ -23,7 +23,7 @@ the agent do?"* — it is:
 This app draws that line and enforces it:
 
 - An agent can design an entire road — geometry, vertical profile, cross sections,
-  superelevation — through 24 WebMCP tools.
+  superelevation — through 28 WebMCP tools.
 - Every change it applies is stamped **agent-proposed** and held for confirmation.
 - **The LandXML deliverable is refused while anything is unconfirmed**, and there is
   deliberately **no tool that clears that**. Confirmation happens in the UI, by a person.
@@ -44,6 +44,8 @@ instead of hoped for in a system prompt.
 | **Edit** | project setup, horizontal elements, PVIs, template segments and drops, superelevation |
 | **Undo** | `undo_last_change` — reverts the agent's own unconfirmed work, and refuses once a human has confirmed it |
 | **Deliver** | `export_landxml` and `export_staking_csv` — both gated on human confirmation |
+| **Hand off** | `read_design_document` / `load_design_document` — the whole design in a link |
+| **Georeference** | `set_coordinate_system` / `read_coordinate_systems` — what places the LandXML in the world |
 
 Three things are deliberate:
 
@@ -89,6 +91,21 @@ gentle    4513.3 ft   min R 3200   min K 248.21   1 of 4 FAIL
 judgement about site, budget and right-of-way that a model does not have. A person
 clicks the option they want.
 
+
+### Handing the design to the engineer who signs
+
+The premise only works if the design can reach the person who has to seal it. So a
+design **saves itself** — reload and it is still there — and packs into a link:
+
+```
+https://…/#design=eyJ2ZXJzaW9uIjoxLCJzYXZlZEF0Ijoi…
+```
+
+About 1.3 KB for a typical road. Everything after `#` stays in the browser and is
+**never sent to a server**, so a design in a link is not logged by anyone's
+infrastructure on the way. No account, no upload, no backend. Open the link in a
+different browser and you get exactly the design that was sent.
+
 ## Design criteria without redistributing a standard
 
 Minimum-radius and K-value tables live in the AASHTO Green Book, a copyrighted
@@ -115,7 +132,7 @@ gets its own answers. Every verdict reports the basis it used.
 
 ```bash
 npm install
-npm test               # 230 tests
+npm test               # 248 tests
 npm run studio         # http://localhost:5173
 npx vite build studio  # production build → studio/dist
 ```
@@ -138,6 +155,7 @@ node scripts/verify-superelevation.mjs  # banking reaches the cross sections and
 node scripts/verify-seal.mjs            # export refused until a human confirms
 node scripts/verify-parity.mjs          # a human can author everything an agent can
 node scripts/verify-new-tools.mjs       # undo, alternatives, and the staking gate
+node scripts/verify-handoff.mjs         # survives reload; a link opens in a SECOND browser
 node scripts/verify-live.mjs            # the whole story against the deployed URL
 node scripts/rehearse-video.mjs         # walks the demo beat by beat, screenshots each
 ```
@@ -150,7 +168,7 @@ src/kernel/      horizontal · vertical · corridor · template-section · crite
                  superelevation — pure, deterministic, golden-tested
 src/exporters/   LandXML 1.2 (ORD-hardened) and construction staking CSV
 src/studio/      WebMCP bridge · typed refusals · agent change ledger · activity log ·
-                 design alternatives
+                 design alternatives · portable design document
 studio/          the app: form, live tables, SVG plan+profile, 3D corridor (three.js)
 ```
 

@@ -31,6 +31,7 @@ import type { SuperelevationSpec } from "../schema/road-design";
 import { AiDesignProposal, proposalToForm } from "./ai-design";
 import { toStakingCsv, stakingRows } from "../exporters/staking";
 import { evaluateAlternatives, type AlternativeInput } from "./alternatives";
+import { fromDocument, toDocument } from "./design-document";
 import { isRefusal, tryBuild, type Refusal } from "./webmcp-refusals";
 
 export const AGENT_PROVENANCE = "agent-proposed; awaiting engineer confirmation";
@@ -81,6 +82,12 @@ export interface StudioHost {
   onToolCall?(tool: string, result: unknown): void;
   /** Undo the most recent agent change. The host owns the history. */
   undoLastAgentChange(): { ok: true; description: string } | { ok: false; reason: string };
+  /** A link that reproduces the current design exactly. */
+  shareLink(): string;
+  /** Set the coordinate reference system by zone key, e.g. GA-West. */
+  setCrs(zone: string, basis: "grid" | "ground"): boolean;
+  /** The CRS zone keys this app offers. */
+  crsZones(): readonly { readonly value: string; readonly label: string }[];
   /** Put a set of alternatives in front of the engineer. Applies nothing.
    *  The design speed goes through too: the engineer's panel must not show
    *  LESS than the agent's own response did. */
@@ -215,6 +222,10 @@ const ANNOTATIONS: Readonly<Record<string, WebMcpToolAnnotations>> = {
   check_design_criteria: { title: "Judge against a design speed", readOnlyHint: true, idempotentHint: true },
   export_landxml: { title: "Export LandXML", readOnlyHint: true, idempotentHint: true },
   export_staking_csv: { title: "Export staking CSV", readOnlyHint: true, idempotentHint: true },
+  read_design_document: { title: "Save or share the design", readOnlyHint: true, idempotentHint: true },
+  read_coordinate_systems: { title: "List coordinate systems", readOnlyHint: true, idempotentHint: true },
+  load_design_document: { title: "Load a design", readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+  set_coordinate_system: { title: "Set the coordinate system", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   propose_alternatives: { title: "Offer the engineer options", readOnlyHint: true, idempotentHint: true },
   undo_last_change: { title: "Undo your last change", readOnlyHint: false, destructiveHint: false, idempotentHint: false },
 
@@ -629,6 +640,101 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
       return { pointCount: rows.length, intervalFt: interval, includeOffsets,
         lengthBytes: csv.length, csv };
     },
+  );
+
+  add(
+    "read_design_document",
+    "Read the whole design as a portable document, plus a link that reproduces it exactly. " +
+      "Send that link to the licensed engineer who has to review and seal the work -- it carries " +
+      "the entire design in the URL fragment, so nothing is uploaded anywhere and no account is " +
+      "needed. Use this whenever the engineer asks to save, share, hand off or keep a copy.",
+    S.obj({}),
+    () => {
+      const form = host.readForm();
+      const built = tryBuild(form);
+      return {
+        document: toDocument(form),
+        shareUrl: host.shareLink(),
+        valid: !isRefusal(built),
+        note: "The link carries the design in the fragment, which browsers never send to a server.",
+      };
+    },
+  );
+
+  add(
+    "load_design_document",
+    "Replace the current design with one from a saved document or a shared link. " +
+      "\u26d4 DESTRUCTIVE: everything currently on screen is replaced. Preview first (omit commit) " +
+      "to see what the incoming design computes to before you apply it. " +
+      "Accepts either the document read_design_document returns, or the bare design inside it.",
+    S.obj({
+      document: { type: "object",
+        description: "The document to load, as returned by read_design_document." },
+      commit: S.commit,
+    }, ["document"]),
+    (args) => {
+      const loaded = fromDocument(args.document);
+      if (!loaded.ok) {
+        return {
+          refused: true,
+          code: "DocumentNotLoadable",
+          detail: `That document cannot be loaded: ${loaded.reason}.`,
+          measurements: {},
+          resolvedBy: ["read_design_document"],
+          authority: ["RoadDesign document v1"],
+        };
+      }
+      return applyOrPreview(host, loaded.form, args.commit === true,
+        loaded.savedAt ? `loaded a design saved ${loaded.savedAt}` : "loaded a design");
+    },
+  );
+
+  add(
+    "set_coordinate_system",
+    "Set the project coordinate reference system. This is what georeferences the LandXML, so " +
+      "OpenRoads or Civil 3D places the alignment in the right part of the world rather than at " +
+      "an arbitrary origin. Call read_coordinate_systems first to see the zones this project " +
+      "offers. Grid coordinates are state-plane; ground coordinates are scaled to surface " +
+      "distances, which is what a survey crew measures.",
+    S.obj({
+      zone: S.str("Zone key, e.g. GA-West. Get the list from read_coordinate_systems."),
+      basis: S.enum(["grid", "ground"], "Grid (state plane) or ground (surface) distances."),
+      commit: S.commit,
+    }, ["zone"]),
+    (args) => {
+      const zone = String(args.zone ?? "");
+      const known = host.crsZones().map((z) => z.value);
+      if (!known.includes(zone)) {
+        return {
+          refused: true,
+          code: "UnknownCoordinateZone",
+          detail: `"${zone}" is not one of the zones this project offers.`,
+          measurements: { zoneCount: known.length },
+          available: known,
+          resolvedBy: ["read_coordinate_systems"],
+          authority: ["Project CRS"],
+        };
+      }
+      const basis = args.basis === "ground" ? "ground" : "grid";
+      if (args.commit !== true) {
+        return { previewed: true, committed: false, change: `coordinate system ${zone} (${basis})`,
+          note: "Nothing changed. Call again with commit: true to apply." };
+      }
+      const ok = host.setCrs(zone, basis);
+      return ok
+        ? { committed: true, change: `coordinate system ${zone} (${basis})`,
+            provenance: AGENT_PROVENANCE,
+            note: "The LandXML export will now georeference to this zone." }
+        : { error: true, code: "BridgeFault", detail: "the CRS control rejected that value" };
+    },
+  );
+
+  add(
+    "read_coordinate_systems",
+    "List the coordinate reference systems this project offers, and which one is selected. " +
+      "The CRS georeferences the LandXML export.",
+    S.obj({}),
+    () => ({ available: host.crsZones(), selected: host.readCrs() ?? null }),
   );
 
   add(

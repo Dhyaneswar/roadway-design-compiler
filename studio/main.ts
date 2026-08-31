@@ -11,6 +11,7 @@ import { registerWebMcp } from "../src/studio/webmcp-bridge";
 import { AgentChangeLedger } from "../src/studio/agent-changes";
 import { AgentActivityLog, classifyResult } from "../src/studio/agent-activity";
 import { AlternativeSet, evaluateAlternatives, type AlternativeInput } from "../src/studio/alternatives";
+import { autosave, decodeFragment, loadAutosave, shareUrl } from "../src/studio/design-document";
 import { transitionFor } from "../src/kernel/superelevation";
 import { sampleAlignment, sampleProfile } from "../src/kernel/sample";
 import { azimuthToBearing, degreesToDms } from "../src/util/angle";
@@ -469,6 +470,7 @@ function refresh(): void {
     // Keep the 3D view (if open/openable) in sync; its failures stay its own.
     lastDesign = design;
     renderSupSummary(design);
+    autosave(readForm());
     try {
       viewer?.update(design);
     } catch (e) {
@@ -742,6 +744,28 @@ function renderPendingBanner(): void {
 }
 
 
+
+/** Zones this project offers, read from the control rather than duplicated. */
+function crsZones(): { value: string; label: string }[] {
+  const sel = document.getElementById("crsZone") as HTMLSelectElement | null;
+  if (!sel) return [];
+  return [...sel.options]
+    .filter((o) => o.value !== "")
+    .map((o) => ({ value: o.value, label: o.textContent ?? o.value }));
+}
+
+/** Set the CRS from a zone key. Returns false if the control rejects it. */
+function setCrs(zone: string, basis: "grid" | "ground"): boolean {
+  const sel = document.getElementById("crsZone") as HTMLSelectElement | null;
+  const bas = document.getElementById("crsBasis") as HTMLSelectElement | null;
+  if (!sel || !bas) return false;
+  if (![...sel.options].some((o) => o.value === zone)) return false;
+  sel.value = zone;
+  bas.value = basis;
+  refresh();
+  return true;
+}
+
 /** A deep copy of the current form, for the undo history. */
 function snapshotForm(): StudioForm {
   return JSON.parse(JSON.stringify(readForm())) as StudioForm;
@@ -889,6 +913,9 @@ const registeredTools = registerWebMcp({
     renderAgentLog();
     return { ok: true as const, description: r.change.description };
   },
+  shareLink: () => shareUrl(readForm(), window.location.href),
+  setCrs,
+  crsZones,
   offerAlternatives: (question, alts: readonly AlternativeInput[], designSpeedMph, emax) => {
     alternatives.offer(question, alts, evaluateAlternatives(alts, designSpeedMph, emax));
     alternatives.designSpeedMph = designSpeedMph;
@@ -1108,6 +1135,42 @@ for (const id of ["supEnabled", "supSpeed", "supEmax", "supNc", "supGrad"]) {
     refresh();
   });
 }
+
+
+// --- restore on load ------------------------------------------------------
+//
+// A shared link wins over autosave: if someone sent you a design, that is what
+// you meant to open. Neither is allowed to break boot -- a corrupt link should
+// leave you in a working studio with the seeded road, not a blank page.
+(() => {
+  const fromLink = window.location.hash ? decodeFragment(window.location.hash) : undefined;
+  const restored = fromLink?.ok === true ? fromLink : loadAutosave();
+  if (!restored.ok) return;
+  try {
+    restoreForm(restored.form);
+    const note = $("status");
+    if (fromLink?.ok === true) {
+      note.innerHTML = '<span class="ok">\u2713 opened a shared design</span>';
+    }
+  } catch {
+    /* a bad restore must not take the app down; the seeded design stands */
+  }
+})();
+
+$("shareLink").addEventListener("click", () => {
+  const url = shareUrl(readForm(), window.location.href);
+  const status = $("status");
+  void navigator.clipboard?.writeText(url)
+    .then(() => {
+      window.history.replaceState(null, "", url);
+      status.innerHTML =
+        '<span class="ok">\u2713 link copied \u2014 it carries the whole design</span>';
+    })
+    .catch(() => {
+      window.history.replaceState(null, "", url);
+      status.innerHTML = '<span class="ok">link is in the address bar \u2014 copy it</span>';
+    });
+});
 
 syncSupControls();
 renderAgentLog();
