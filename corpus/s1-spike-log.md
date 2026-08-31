@@ -9,9 +9,9 @@
   Profile) — wrong importer, not (necessarily) a wrong file.
 - File validation: `RDC-S1-SAMPLE.xml` passes the official LandXML 1.2 XSD
   (validated 2026-06-11 with xmlschema against landxml.org schema). 
-- Environment note: the import was run inside a production, ProjectWise-managed
-  OpenRoads Designer installation — a licensed commercial deployment rather than a
-  sandbox, which is what makes this a field result and not a lab one.
+- Environment note: the import was run inside a licensed OpenRoads Designer
+  installation rather than a sandbox, which is what makes this a field result and
+  not a lab one.
 
 ## Attempt 2 — retry script (the correct door)
 1. Open a roadway DESIGN file (not a survey fieldbook dgn) — any scratch design
