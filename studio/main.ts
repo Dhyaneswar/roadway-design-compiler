@@ -208,8 +208,30 @@ function fmtSta(v: number): string {
   return `${s}+${r.toFixed(2).padStart(5, "0")}`;
 }
 
-function input(value: string, on: (v: string) => void, placeholder = ""): HTMLInputElement {
+/**
+ * A form input.
+ *
+ * `step` makes it a NUMBER input: the field then carries spinner arrows and
+ * responds to Up/Down, which is how these values are actually adjusted -- a
+ * radius is nudged 100 ft at a time far more often than it is retyped. Step is
+ * per-field because the useful increment differs by two orders of magnitude
+ * between a cross slope (0.1%) and a radius (100 ft).
+ *
+ * Omit `step` for free text, e.g. the alignment name.
+ */
+function input(
+  value: string,
+  on: (v: string) => void,
+  placeholder = "",
+  step?: number,
+  min?: number,
+): HTMLInputElement {
   const el = document.createElement("input");
+  if (step !== undefined) {
+    el.type = "number";
+    el.step = String(step);
+    if (min !== undefined) el.min = String(min);
+  }
   el.value = value;
   el.placeholder = placeholder;
   el.addEventListener("input", () => { on(el.value); refresh(); });
@@ -253,12 +275,12 @@ function renderElements(): void {
     div.append(field("type", kind));
 
     if (row.kind === "tangent") {
-      div.append(field("length (ft)", input(row.length ?? "", (v) => (row.length = v))));
+      div.append(field("length (ft)", input(row.length ?? "", (v) => (row.length = v), "", 50, 0)));
     } else if (row.kind === "arc") {
-      div.append(field("radius (ft)", input(row.radius ?? "", (v) => (row.radius = v))));
-      div.append(field("delta (°)", input(row.deltaDeg ?? "", (v) => (row.deltaDeg = v))));
+      div.append(field("radius (ft)", input(row.radius ?? "", (v) => (row.radius = v), "", 100, 0)));
+      div.append(field("delta (°)", input(row.deltaDeg ?? "", (v) => (row.deltaDeg = v), "", 1, 0)));
     } else {
-      div.append(field("deflection (°)", input(row.deflectionDeg ?? "", (v) => (row.deflectionDeg = v))));
+      div.append(field("deflection (°)", input(row.deflectionDeg ?? "", (v) => (row.deflectionDeg = v), "", 1, 0)));
     }
     if (row.kind !== "tangent") {
       const dir = document.createElement("select");
@@ -293,7 +315,7 @@ function renderPvis(): void {
     // derived (begin / end station), not typed — like ORD's profile extents.
     const isFirst = i === 0;
     const isLast = i === pvis.length - 1;
-    const staInput = input(row.station, (v) => (row.station = v));
+    const staInput = input(row.station, (v) => (row.station = v), "", 25);
     staInput.id = `pviSta-${i}`;
     if (isFirst || isLast) {
       staInput.disabled = true;
@@ -304,8 +326,8 @@ function renderPvis(): void {
     }
     const staLabel = isFirst ? "station (= begin)" : isLast ? "station (= end)" : "station (ft)";
     div.append(field(staLabel, staInput));
-    div.append(field("elevation (ft)", input(row.elevation, (v) => (row.elevation = v))));
-    div.append(field("VC length (ft)", input(row.curveLength ?? "", (v) => (row.curveLength = v), "none")));
+    div.append(field("elevation (ft)", input(row.elevation, (v) => (row.elevation = v), "", 1)));
+    div.append(field("VC length (ft)", input(row.curveLength ?? "", (v) => (row.curveLength = v), "none", 100, 0)));
     const del = document.createElement("button");
     del.className = "x"; del.textContent = "✕";
     del.addEventListener("click", () => { pvis.splice(i, 1); renderPvis(); refresh(); });
@@ -395,8 +417,8 @@ function renderTemplates(): void {
         const row = document.createElement("div");
         row.className = "seg";
         row.append(field("segment", input(seg.name, (v) => { seg.name = v; })));
-        row.append(field("width (ft)", input(seg.width, (v) => { seg.width = v; updateTemplatePreview(ti); })));
-        row.append(field("slope (%)", input(seg.slopePercent, (v) => { seg.slopePercent = v; updateTemplatePreview(ti); })));
+        row.append(field("width (ft)", input(seg.width, (v) => { seg.width = v; updateTemplatePreview(ti); }, "", 0.5, 0)));
+        row.append(field("slope (%)", input(seg.slopePercent, (v) => { seg.slopePercent = v; updateTemplatePreview(ti); }, "", 0.1)));
         const x = document.createElement("button");
         x.className = "x"; x.textContent = "✕";
         x.addEventListener("click", () => { t[side].splice(si, 1); renderTemplates(); refresh(); });
@@ -449,7 +471,7 @@ function renderDrops(): void {
     div.append(field("template", sel));
 
     const isLast = i === drops.length - 1;
-    const toInput = input(row.toStation, (v) => (row.toStation = v));
+    const toInput = input(row.toStation, (v) => (row.toStation = v), "", 25);
     toInput.id = `dropTo-${i}`;
     if (isLast) {
       toInput.disabled = true;
@@ -460,7 +482,7 @@ function renderDrops(): void {
 
     // Taper from the previous drop's template (not meaningful on the first).
     if (i > 0) {
-      const tr = input(row.transition ?? "", (v) => (row.transition = v), "none");
+      const tr = input(row.transition ?? "", (v) => (row.transition = v), "none", 25, 0);
       tr.title = "blend from the previous template over this many feet";
       div.append(field("taper (ft)", tr));
     }
