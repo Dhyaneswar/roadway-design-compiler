@@ -1,5 +1,9 @@
 # Roadway Design Compiler
 
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-485%20passing-brightgreen.svg)](tests)
+[![WebMCP tools](https://img.shields.io/badge/WebMCP-39%20tools-8a2be2.svg)](#what-the-agent-can-do)
+
 **An agent-native roadway design tool. The agent does the engineering. It cannot sign for it.**
 
 Live: **https://roadway-design-compiler.gandidhyaneswar.workers.dev**
@@ -23,7 +27,7 @@ the agent do?"* — it is:
 This app draws that line and enforces it:
 
 - An agent can design an entire road — geometry, vertical profile, cross sections,
-  superelevation — through 37 WebMCP tools.
+  superelevation — through 39 WebMCP tools.
 - Every change it applies is stamped **agent-proposed** and held for confirmation.
 - **The LandXML deliverable is refused while anything is unconfirmed**, and there is
   deliberately **no tool that clears that**. Confirmation happens in the UI, by a person.
@@ -50,6 +54,7 @@ instead of hoped for in a system prompt.
 | **Ground** | `read_ground` / `read_terrain_extent` — cut and fill against a surveyed surface |
 | **Dress** | `set_segment_material` and `place_roadside_item` — what the road is made of, and the guardrail, barrier, curb and markings on it |
 | **Hand off** | `read_design_document` / `load_design_document` — the whole design in a link |
+| **Structure** | `set_pavement_layers` / `read_pavement_layers` — the pavement courses an engineer states, recorded at their exact authored thickness and drawn under the road. ⛔ Authored, never designed: no default stack, no thickness suggested, and no adequacy calculated |
 | **Georeference** | `set_coordinate_system` / `read_coordinate_systems` — what places the LandXML in the world |
 
 Three things are deliberate:
@@ -271,7 +276,7 @@ gets its own answers. Every verdict reports the basis it used.
 
 ```bash
 npm install
-npm test               # 324 tests
+npm test               # 485 tests
 npm run studio         # http://localhost:5173
 npx vite build studio  # production build → studio/dist
 ```
