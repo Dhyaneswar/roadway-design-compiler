@@ -16,7 +16,18 @@ const tangent = z.object({
 const arc = z.object({
   type: z.literal("arc"),
   radius: z.number().positive({ message: "arc radius must be positive" }),
-  deltaDeg: z.number().positive().max(180),
+  // ⛔ EXCLUSIVE of 180. A circular curve's tangent and external distances are
+  // R·tan(Δ/2) and R·(sec(Δ/2)−1), both singular at Δ=180 where the two tangents
+  // are parallel and never meet -- there is no curve to compute.
+  //
+  // ⚠ This read .max(180) and let exactly 180 through. It survived every
+  // finiteness check because IEEE 754 cannot represent π/2 exactly, so
+  // Math.tan(π/2) returns 1.63e16 rather than Infinity: at R=400 the preview
+  // reported a tangent distance of 6.53e18 ft and Number.isFinite said true.
+  // Plausible-looking garbage passes guards that Infinity would have tripped.
+  deltaDeg: z.number().positive().lt(180,
+    "a circular curve must deflect less than 180 degrees: at 180 the tangents are " +
+    "parallel and the tangent and external distances are undefined"),
   direction: z.enum(["left", "right"]),
 });
 

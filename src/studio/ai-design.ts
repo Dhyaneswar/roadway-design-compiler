@@ -13,7 +13,10 @@ const aiTangent = z.object({
 const aiArc = z.object({
   type: z.literal("arc"),
   radius: z.number().positive(),
-  deltaDeg: z.number().positive().max(180),
+  // Same exclusive bound as the design schema -- a proposal must not be able to
+  // author a curve the kernel cannot compute.
+  deltaDeg: z.number().positive().lt(180,
+    "a circular curve must deflect less than 180 degrees"),
   direction: z.enum(["left", "right"]),
 });
 

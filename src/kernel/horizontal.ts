@@ -122,6 +122,15 @@ export function computeHorizontal(a: HorizontalAlignment): HorizontalResult {
       const center = ahead(begin, beginAz + sign * 90, radius);
       // Radial from center back to the begin point.
       const radialAz0 = beginAz - sign * 90;
+      // ⛔ Refuse rather than return a number nobody can use. The schema is the
+      // gate for authored designs, but this function is exported and
+      // alignmentRangeFromForm calls it on raw form values before validation.
+      if (!(deltaDeg > 0) || deltaDeg >= 180) {
+        throw new Error(
+          `a circular curve must deflect more than 0 and less than 180 degrees ` +
+          `(got ${deltaDeg}). At 180 the tangents are parallel and never meet.`,
+        );
+      }
       const half = (deltaDeg / 2) * DEG;
       const curve: CurveData = {
         radius,

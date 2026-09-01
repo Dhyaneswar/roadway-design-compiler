@@ -2029,7 +2029,11 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
       type: S.enum(["tangent", "arc", "deflection"], "Element type."),
       lengthFt: S.num("Tangent length in feet. Required for type tangent."),
       radiusFt: S.num("Curve radius in feet. Required for type arc."),
-      deltaDeg: S.num("Curve deflection angle in degrees, 0 to 180. Required for type arc."),
+      deltaDeg: S.num(
+        "Curve deflection angle in degrees. Greater than 0 and LESS THAN 180 -- at exactly "
+          + "180 the two tangents are parallel, never meet, and the tangent and external "
+          + "distances are undefined. Required for type arc.",
+      ),
       deflectionDeg: S.num("Angle point deflection in degrees, under 10. Required for type deflection."),
       direction: S.enum(["left", "right"], "Turn direction for arc or deflection."),
       commit: S.commit,
