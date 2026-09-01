@@ -11,13 +11,29 @@
       --bad: #f85149; --warn: #d29922; --mono: "Cascadia Code", Consolas, monospace;
     }
     * { box-sizing: border-box; margin: 0; }
-    body { background: var(--bg); color: var(--text); font: 14px/1.45 "Segoe UI", system-ui, sans-serif; }
-    header { padding: 14px 22px; border-bottom: 1px solid var(--line); display: flex; align-items: baseline; gap: 14px; }
+    /* One full-height column: header, then whichever view is active fills the
+       rest. Nothing here hardcodes the header's height -- it was assumed to be
+       53px and is actually 58, so every view was 5px too tall and the page
+       scrolled behind the panes that were supposed to be pinned. */
+    body { background: var(--bg); color: var(--text); font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
+           height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+    header { padding: 14px 22px; border-bottom: 1px solid var(--line); display: flex; align-items: baseline; gap: 14px;
+             flex: none; }
     header h1 { font-size: 17px; font-weight: 600; }
     header .tag { color: var(--dim); font-size: 12px; }
-    main { display: grid; grid-template-columns: 460px 1fr; gap: 0; min-height: calc(100vh - 53px); }
-    .inputs { border-right: 1px solid var(--line); padding: 18px 22px 60px; }
-    .results { padding: 18px 22px 60px; background: var(--bg); }
+    /* The computed design stays put while the form scrolls.
+       Each column owns its own scrollbar and the page itself never scrolls, so
+       reading a curve table no longer means losing the inputs that produced it.
+       min-height:0 is load-bearing: a grid item's automatic minimum size is its
+       content, which silently defeats overflow-y on the child. */
+    main { display: grid; grid-template-columns: 460px 1fr; gap: 0;
+           flex: 1 1 auto; min-height: 0; overflow: hidden; }
+    .inputs { border-right: 1px solid var(--line); padding: 18px 22px 60px;
+              overflow-y: auto; min-height: 0; }
+    /* Sticks. Scrolls internally only when its own content outgrows the viewport,
+       so a design with many curves stays reachable instead of being clipped. */
+    .results { padding: 18px 22px 60px; background: var(--bg);
+               overflow-y: auto; min-height: 0; }
     h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); margin: 22px 0 8px; }
     h2:first-child { margin-top: 0; }
     .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -58,7 +74,7 @@
     /* View switcher (header) + full-screen 3D corridor view */
     .views { margin-left: auto; display: flex; gap: 6px; }
     .view-btn.active { border-color: var(--accent); color: var(--accent); }
-    #view3d { height: calc(100vh - 53px); display: flex; flex-direction: column; }
+    #view3d { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
     .v3d-bar { display: flex; gap: 18px; align-items: center; padding: 8px 22px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--dim); }
     .v3d-bar select { width: auto; padding: 2px 6px; font-size: 12px; }
     #readout3d { font: 12.5px var(--mono); color: var(--text); margin-left: auto; text-align: right; min-height: 1em; }
