@@ -81,7 +81,19 @@ export function toDocument(
 export type LoadResult =
   | { ok: true; form: StudioForm; savedAt?: string; unconfirmed: string[];
       context?: DesignDocument["context"] }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string;
+      /**
+       * Set only when the hash carried NO design at all -- a bare `#section`
+       * anchor rather than a share link.
+       *
+       * ⛔ The caller needs this to tell "this link is not a share" from "this
+       * share is broken". Without it, a truncated share URL fell through to the
+       * reader's own autosave and opened someone else's road under a valid
+       * banner, which is worse than a blank page because it looks right.
+       * Carried as a CODE rather than matched on `reason`, which is prose meant
+       * for a person and free to be reworded.
+       */
+      code?: "no-design-in-link" };
 
 /**
  * Restore a document. Deliberately forgiving about WHERE the design sits -- a
@@ -147,7 +159,9 @@ export function encodeFragment(
 
 export function decodeFragment(fragment: string): LoadResult {
   const raw = fragment.replace(/^#/, "");
-  if (!raw.startsWith(FRAGMENT_KEY)) return { ok: false, reason: "no design in this link" };
+  if (!raw.startsWith(FRAGMENT_KEY)) {
+    return { ok: false, reason: "no design in this link", code: "no-design-in-link" };
+  }
   const b64 = raw.slice(FRAGMENT_KEY.length).replace(/-/g, "+").replace(/_/g, "/");
   try {
     const binary = atob(b64);

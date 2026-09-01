@@ -128,7 +128,9 @@ export function computeHorizontal(a: HorizontalAlignment): HorizontalResult {
       if (!(deltaDeg > 0) || deltaDeg >= 180) {
         throw new Error(
           `a circular curve must deflect more than 0 and less than 180 degrees ` +
-          `(got ${deltaDeg}). At 180 the tangents are parallel and never meet.`,
+          `(got ${deltaDeg}). This kernel uses the minor-arc simple-curve model: at ` +
+          `exactly 180 the tangents are parallel and never meet, and past 180 the ` +
+          `tangent distance changes sign and puts the PI on the wrong side.`,
         );
       }
       const half = (deltaDeg / 2) * DEG;

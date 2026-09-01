@@ -255,7 +255,63 @@ function applyOrPreview(
     return { previewed: true, committed: false, ...consequence,
       note: "Nothing changed. Call again with commit: true to apply." };
   }
+  /**
+   * ⛔ A write that FAILS must not leave its failure behind.
+   *
+   * F035. The read-back guard below reported LossyWrite honestly and then left
+   * the mangled form on screen and the pending change in the ledger, so a tool
+   * that said "this did not work" had in fact changed the design and armed the
+   * confirmation banner. The engineer is then asked to confirm a change the app
+   * has already disowned.
+   *
+   * Rolled back through the ledger's own undo rather than a second writeForm,
+   * which would record ANOTHER pending change to cancel the first.
+   */
+  const before = host.readForm();
+  const pendingBefore = host.pendingChanges().length;
+
   host.writeForm(next, what);
+
+  const rollBack = (code: string, detail: string): unknown => {
+    const undo = host.undoLastAgentChange();
+    const restored =
+      undo.ok === true &&
+      host.pendingChanges().length === pendingBefore &&
+      JSON.stringify(host.readForm()) === JSON.stringify(before);
+    return {
+      error: true,
+      code,
+      /**
+       * ⛔ The sentence about STATE is appended HERE, never by the caller.
+       *
+       * F036. A caller wrote "the design has been left as it was" into its own
+       * detail, which was true only when the rollback actually ran -- so a failed
+       * rollback returned `rolledBack: false` and a warning beside prose claiming
+       * the opposite. An agent reading the prose and an agent reading the flag
+       * would have drawn opposite conclusions from one response.
+       *
+       * Only this function knows whether the state was restored, so only this
+       * function gets to describe it.
+       */
+      detail:
+        detail +
+        (restored
+          ? " The design has been left exactly as it was."
+          : " The change could NOT be rolled back, so the design on screen may still" +
+            " hold it -- check the Studio before continuing."),
+      // Stated rather than assumed: if the rollback itself could not run, the
+      // caller must not be told the design is untouched when it is not.
+      rolledBack: restored,
+      ...(restored
+        ? {}
+        : {
+            warning:
+              "The change could not be rolled back automatically. The design on " +
+              "screen may still hold it; check the Studio before continuing.",
+          }),
+      pendingEngineerConfirmation: host.pendingChanges().length,
+    };
+  };
 
   // Read it back and prove the change survived.
   //
@@ -267,21 +323,20 @@ function applyOrPreview(
   // same way -- so success is now measured rather than assumed.
   const readBack = tryBuild(host.readForm());
   if (isRefusal(readBack)) {
-    return {
-      error: true,
-      code: "WriteNotReadable",
-      detail: `The change was applied but the design no longer builds: ${readBack.detail}`,
-    };
+    return rollBack(
+      "WriteNotReadable",
+      `The change was refused: applying it left a design that no longer builds ` +
+        `(${readBack.detail}).`,
+    );
   }
   if (JSON.stringify(readBack.design) !== JSON.stringify(built.design)) {
-    return {
-      error: true,
-      code: "LossyWrite",
-      detail:
-        `"${what}" was applied but did not survive the round trip -- the design read back ` +
-        `differs from the one that was validated. Some authored field is being dropped ` +
-        `between the form and the design. This is a defect in the app, not in your request.`,
-    };
+    return rollBack(
+      "LossyWrite",
+      `"${what}" did not survive the round trip -- the design read back differs from the ` +
+        `one that was validated, so some authored value is being altered or dropped ` +
+        `between the form and the design. This is a defect in the app, not in your ` +
+        `request.`,
+    );
   }
 
   return {

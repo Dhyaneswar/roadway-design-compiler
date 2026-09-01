@@ -27,19 +27,44 @@ const seed = (): StudioForm => ({
   drops: [{ template: "2-lane", toStation: "" }],
 });
 
-/** A host whose storage optionally loses a field on the way back out. */
-function makeHost(lose?: (f: StudioForm) => void): { host: StudioHost; written: string[] } {
+const clone = <T>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
+
+/**
+ * A host whose storage optionally loses a field on the way back out.
+ *
+ * ⚠ This fixture now implements a REAL undo. It used to answer every
+ * undoLastAgentChange with "nothing-to-undo", which made the rollback assertions
+ * below impossible to write and let F035 sit undetected: the guard reported
+ * LossyWrite while the mangled form and its pending change stayed live. A stub
+ * that cannot fail is a stub that cannot test.
+ */
+function makeHost(
+  lose?: (f: StudioForm) => void,
+  /** Simulate a rollback that cannot run, to test what the response then says. */
+  undoFails = false,
+): { host: StudioHost; written: string[] } {
   let current = seed();
   const written: string[] = [];
+  /** The pre-change snapshots the real Studio keeps in its agent ledger. */
+  const history: { form: StudioForm; written: string[] }[] = [];
   const host: StudioHost = {
-    readForm: () => JSON.parse(JSON.stringify(current)) as StudioForm,
+    readForm: () => clone(current),
     writeForm: (next, agentChange) => {
-      current = JSON.parse(JSON.stringify(next)) as StudioForm;
+      history.push({ form: clone(current), written: [...written] });
+      current = clone(next);
       lose?.(current);
       if (agentChange) written.push(agentChange);
     },
     pendingChanges: () => written.map((d, i) => ({ id: i + 1, description: d })),
-    undoLastAgentChange: () => ({ ok: false as const, reason: "nothing-to-undo" }),
+    undoLastAgentChange: () => {
+      if (undoFails) return { ok: false as const, reason: "nothing-to-undo" as const };
+      const prev = history.pop();
+      if (!prev) return { ok: false as const, reason: "nothing-to-undo" as const };
+      current = prev.form;
+      written.length = 0;
+      written.push(...prev.written);
+      return { ok: true as const, description: "undone" };
+    },
     offerAlternatives: () => 0,
     shareLink: () => "https://example.test/#design=x",
     setCrs: () => true,
@@ -60,6 +85,16 @@ const call = async (host: StudioHost, name: string, args: Record<string, unknown
   const tool = buildTools(host).find((t) => t.name === name)!;
   const res = await tool.execute(args);
   return JSON.parse(res.content[0]!.text) as Record<string, unknown>;
+};
+
+/**
+ * F035. A refused write must leave NOTHING behind -- not the mangled form, and
+ * not the pending change that would ask an engineer to confirm work the app has
+ * already disowned.
+ */
+const expectUntouched = (host: StudioHost): void => {
+  expect(host.readForm(), "form restored to exactly its prior state").toEqual(seed());
+  expect(host.pendingChanges().length, "no pending change left behind").toBe(0);
 };
 
 describe("a commit is only reported when the change survived", () => {
@@ -84,6 +119,10 @@ describe("a commit is only reported when the change survived", () => {
     expect(r.committed).toBeUndefined();
     expect(r.code).toBe("LossyWrite");
     expect(String(r.detail)).toContain("did not survive the round trip");
+    // Said out loud, so a caller never has to infer it from the absence of a flag.
+    expect(r.rolledBack).toBe(true);
+    expect(r.warning).toBeUndefined();
+    expectUntouched(host);
   });
 
   it("catches a dropped superelevation policy the same way", async () => {
@@ -91,6 +130,7 @@ describe("a commit is only reported when the change survived", () => {
     const r = await call(host, "set_superelevation",
       { designSpeedMph: 60, emax: 0.06, commit: true });
     expect(r.code).toBe("LossyWrite");
+    expectUntouched(host);
   });
 
   it("catches dropped roadside furniture the same way", async () => {
@@ -100,6 +140,7 @@ describe("a commit is only reported when the change survived", () => {
       beginStationFt: 1100, endStationFt: 1500, offsetFt: 20, commit: true,
     });
     expect(r.code).toBe("LossyWrite");
+    expectUntouched(host);
   });
 
   it("says the fault is the app's, not the caller's", async () => {
@@ -120,5 +161,40 @@ describe("a commit is only reported when the change survived", () => {
     const { host } = makeHost((f) => { f.elements = []; });
     const r = await call(host, "set_project_setup", { name: "x", commit: true });
     expect(r.code).toBe("WriteNotReadable");
+    expectUntouched(host);
+  });
+});
+
+/**
+ * F036. When the rollback itself cannot run, the response must say so in BOTH
+ * the flag and the prose. It used to carry `rolledBack: false` and a warning
+ * beside a detail claiming "the design has been left as it was" -- an agent
+ * reading the sentence and an agent reading the flag would have reached opposite
+ * conclusions from one response.
+ */
+describe("a rollback that cannot run is not described as one that did", () => {
+  it("never claims a clean state it did not achieve", async () => {
+    const { host } = makeHost((f) => { delete f.superelevation; }, true);
+    const r = await call(host, "set_superelevation",
+      { designSpeedMph: 60, emax: 0.06, commit: true });
+
+    expect(r.code).toBe("LossyWrite");
+    expect(r.rolledBack).toBe(false);
+    expect(String(r.detail)).not.toMatch(/left (exactly )?as it was/);
+    expect(String(r.detail)).toContain("could NOT be rolled back");
+    expect(String(r.warning)).toContain("may still hold it");
+    // And the honesty is load-bearing: the change really is still there.
+    expect(host.pendingChanges().length).toBe(1);
+  });
+
+  it("says the opposite, and means it, when the rollback does run", async () => {
+    const { host } = makeHost((f) => { delete f.superelevation; });
+    const r = await call(host, "set_superelevation",
+      { designSpeedMph: 60, emax: 0.06, commit: true });
+
+    expect(r.rolledBack).toBe(true);
+    expect(String(r.detail)).toContain("left exactly as it was");
+    expect(r.warning).toBeUndefined();
+    expectUntouched(host);
   });
 });

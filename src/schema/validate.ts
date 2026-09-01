@@ -3,6 +3,7 @@
 // edits, which are only ever accepted as validated document patches.
 
 import { z } from "zod";
+import { illegalXmlCharMessage, isXmlSafeText } from "./xml-text";
 import { computeHorizontal } from "../kernel/horizontal";
 import type { RoadDesign } from "./road-design";
 
@@ -20,14 +21,22 @@ const arc = z.object({
   // R·tan(Δ/2) and R·(sec(Δ/2)−1), both singular at Δ=180 where the two tangents
   // are parallel and never meet -- there is no curve to compute.
   //
+  // ⚠ PAST 180 the reason is different, and saying so wrongly cost a README
+  // correction. A 276° cul-de-sac bulb is a perfectly real MAJOR arc whose
+  // tangents DO intersect; what fails is this model, not the geometry. tan(Δ/2)
+  // simply goes negative and puts the PI on the far side. The bound is the
+  // minor-arc convention's domain, and major arcs are an unbuilt feature rather
+  // than an impossible one.
+  //
   // ⚠ This read .max(180) and let exactly 180 through. It survived every
   // finiteness check because IEEE 754 cannot represent π/2 exactly, so
   // Math.tan(π/2) returns 1.63e16 rather than Infinity: at R=400 the preview
   // reported a tangent distance of 6.53e18 ft and Number.isFinite said true.
   // Plausible-looking garbage passes guards that Infinity would have tripped.
   deltaDeg: z.number().positive().lt(180,
-    "a circular curve must deflect less than 180 degrees: at 180 the tangents are " +
-    "parallel and the tangent and external distances are undefined"),
+    "a circular curve must deflect less than 180 degrees: this kernel uses the " +
+    "minor-arc simple-curve model, where at 180 the tangents are parallel and the " +
+    "tangent and external distances are undefined, and past 180 they change sign"),
   direction: z.enum(["left", "right"]),
 });
 
@@ -129,7 +138,15 @@ const roadsideItem = z.object({
 
 const roadDesign = z
   .object({
-    name: z.string().min(1),
+    // ⛔ The name is the one authored string that reaches the LandXML file, so
+    // the character-set rule lives here, at the gate, rather than in the
+    // exporter where the design has already been mutated to hold it.
+    name: z
+      .string()
+      .min(1)
+      .refine(isXmlSafeText, {
+        error: (iss) => illegalXmlCharMessage(String(iss.input)) ?? "invalid name",
+      }),
     alignment: horizontalAlignment,
     profile: verticalProfile,
     templates: z.record(z.string(), template),

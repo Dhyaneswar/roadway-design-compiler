@@ -860,8 +860,22 @@ function writeForm(next: StudioForm, agentChange?: string): void {
 
 /** The confirmation boundary, made visible. An agent may author the whole road;
  *  only a person standing behind a seal can confirm it. */
+/**
+ * ⛔ A failed restore must not DESTROY the design it refused to load.
+ *
+ * F033. Declining to READ a corrupt share was only half the job: boot ends with
+ * refresh(), refresh() ends with persist(), and persist() wrote the seeded road
+ * straight over the reader's stored design. Opening one bad link silently threw
+ * away work that was never the link's to touch.
+ *
+ * Held only for the boot pass. The moment the reader edits anything they have
+ * chosen to work here, and that edit persists normally.
+ */
+let preserveAutosave = false;
+
 /** Save the design AND what is still unconfirmed, so a reload restores both. */
 function persist(): void {
+  if (preserveAutosave) return;
   autosave(readForm(), undefined, pendingDescriptions(), contextSummary());
 }
 
@@ -1577,10 +1591,66 @@ for (const id of ["supEnabled", "supSpeed", "supEmax", "supNc", "supGrad"]) {
 // A shared link wins over autosave: if someone sent you a design, that is what
 // you meant to open. Neither is allowed to break boot -- a corrupt link should
 // leave you in a working studio with the seeded road, not a blank page.
+/**
+ * Why a boot problem is remembered instead of shown where it happens: the last
+ * line of this module is refresh(), which writes "valid design" over the status
+ * on success. A message set here would be true and invisible.
+ */
+let restoreProblem: string | undefined;
+
 (() => {
   const fromLink = window.location.hash ? decodeFragment(window.location.hash) : undefined;
+
+  /**
+   * ⛔ A link that CLAIMS to carry a design is authoritative, decode or not.
+   *
+   * This used to read `fromLink?.ok === true ? fromLink : loadAutosave()`, so a
+   * truncated or tampered share URL fell through to whatever the reader had
+   * saved locally -- and the studio opened their own unrelated road under a
+   * "valid design" banner, with the decode failure never mentioned. That is
+   * worse than a blank page: it looks like the design they were sent.
+   *
+   * A bare `#anchor` is NOT a share and must still fall through, which is what
+   * the no-design-in-link code distinguishes.
+   */
+  if (fromLink && !fromLink.ok && fromLink.code !== "no-design-in-link") {
+    restoreProblem = `could not restore your shared design: ${fromLink.reason}` +
+      ` — the seeded design is loaded instead`;
+    preserveAutosave = true;
+    return;
+  }
+
   const restored = fromLink?.ok === true ? fromLink : loadAutosave();
   if (!restored.ok) return;
+  const source = fromLink?.ok === true ? "shared design" : "saved design";
+
+  /**
+   * ⛔ A restored design must COMPUTE, not merely parse.
+   *
+   * The guard below wrapped restoreForm alone, which writes values into form
+   * fields and cannot fail on a geometrically impossible road. The throw comes
+   * later, from refresh(), OUTSIDE that block -- so a saved design a stricter
+   * build now refuses was adopted anyway, and the studio opened showing an
+   * error and no design at all. This block's own comment promised the opposite.
+   *
+   * Not hypothetical: shipping the delta < 180 bound turned every autosave
+   * holding a 180 degree curve into a dead first impression, recoverable only
+   * through a control a reader had no reason to suspect.
+   *
+   * Checked against the restored form OBJECT, before the DOM is touched, so
+   * there is nothing to unwind when it fails -- the seeded design just stands.
+   */
+  try {
+    const candidate = formToDesign(restored.form);
+    computeHorizontal(candidate.alignment);
+    computeVertical(candidate.profile);
+  } catch (e) {
+    restoreProblem = `could not restore your ${source}: ${(e as Error).message}` +
+      ` — the seeded design is loaded instead`;
+    preserveAutosave = true;
+    return;
+  }
+
   try {
     restoreForm(restored.form);
     // \u26d4 Unconfirmed work stays unconfirmed when it changes hands.
@@ -1606,8 +1676,13 @@ for (const id of ["supEnabled", "supSpeed", "supEmax", "supNc", "supGrad"]) {
           `${restored.unconfirmed.length === 1 ? "" : "s"} you have not reviewed`
         : '<span class="ok">\u2713 opened a shared design</span>';
     }
-  } catch {
-    /* a bad restore must not take the app down; the seeded design stands */
+  } catch (e) {
+    /* a bad restore must not take the app down; the seeded design stands --
+       but it must not do it silently either, or the road on screen is not the
+       one the reader saved and nothing on the page says so. */
+    restoreProblem = `could not restore your ${source}: ${(e as Error).message}` +
+      ` — the seeded design is loaded instead`;
+    preserveAutosave = true;
   }
 })();
 
@@ -1690,3 +1765,11 @@ renderPvis();
 renderTemplates();
 renderDrops();
 refresh();
+// Last, so the boot refresh above cannot write "valid design" over it. The
+// design on screen IS valid -- it is the seeded one, which is exactly the fact
+// the reader needs told.
+if (restoreProblem) setStatus("err", restoreProblem);
+// Boot is over. Whatever the reader does from here is their own choice and
+// persists normally; the hold existed only so opening the page could not
+// destroy a stored design it had just declined to load.
+preserveAutosave = false;

@@ -182,8 +182,40 @@ Run it against your own files:
 npx tsx scripts/try-import.mjs <file-or-directory>
 ```
 
-Against the 12 public samples available here: **2 imported, 10 refused, every refusal
-naming its reason.**
+Against 16 public samples from LandXML.org — Autodesk, Carlson, AASHTO SDMS, TopoCAD,
+Civil 3D survey — **5 imported with alignments, 4 as terrain-only context, 1 as
+plan-feature context, and 6 safely refused.**
+
+"Accepted" is not the same as "read a road", so the split is stated rather than summed:
+
+| accepted as | files | what actually came in |
+|---|---|---|
+| a road | 5 | `Corridor-6a`, `GSG_features_corridors`, `MiddleCalmarRoad`, `Surface and alignments`, `simple road` |
+| terrain context | 4 | TIN but no alignment: `ALL-DRIVES AND ROADS`, `Olympus_Subdivision`, `US68Merge2`, `corridor from CD3` |
+| site context | 1 | plan features only: `sv_tutor` |
+
+The middle row is the point of the context importer, not a shortfall: a file with
+69,831 triangles and no centreline is exactly the ground you want under a road you
+are about to draw.
+
+The six refusals divide into three honest reasons rather than one vague count:
+
+| refused | why |
+|---|---|
+| 3 files | no `<Alignment>` at all — survey points and parcel plats, which are not roads |
+| 2 files | spiral transitions (`MntnRoad` uses 16, `SR658` uses 2); this kernel models tangents, circular curves and deflections |
+| 1 file | a cul-de-sac bulb whose arc spans **276.66°** |
+
+⚠ That last one is a named gap, not a parse failure. This kernel's PI, tangent-distance
+and external-distance model uses the conventional **minor-arc** simple-curve
+representation, `0 < Δ < 180°`. A 276.66° bulb is a major arc: its geometry is perfectly
+well defined, but `R·tan(Δ/2)` goes *negative* there and puts the PI on the wrong side.
+Refusing it avoids silently changing somebody's road. Major-arc support remains
+unbuilt, and cul-de-sac bulbs are ordinary residential geometry.
+
+⛔ Only at **exactly 180°** do the tangents become parallel and genuinely never meet.
+An earlier draft of this section claimed that was true beyond 180° as well. It is not,
+and the corrected statement is the one above.
 
 
 ### The road on the ground
@@ -369,6 +401,23 @@ decides *what is true*.
 The LandXML exporter has been round-tripped into a production OpenRoads Designer
 installation as a native alignment and profile, and Bentley's own annotation
 reproduced the curve table to 0.01 ft. See `corpus/s1-spike-log.md`.
+
+### Where else this file goes
+
+The exporter writes LandXML 1.2 alignment and profile geometry. Civil 3D, OpenRoads,
+Trimble Business Center and Carlson all document native LandXML import, but the
+supported element set varies by product.
+
+⚠ The line between these is deliberate: **this project's output has actually been
+round-tripped in ORD**; the others are documented compatibility targets, not certified
+round-trips. Global Mapper is not listed, because its LandXML support covers 3D points,
+TIN faces, contours and watershed areas — not the `Alignment` and `Profile` this
+exporter emits.
+
+Files in the wild declare 1.0, 1.1, 1.2 and draft-2.0 variants, and vendors implement
+subsets, which is why six of sixteen public samples above are refused rather than
+guessed at. "LandXML in" does not by itself mean "it works", even between two
+commercial packages.
 
 ## Status and limits
 
