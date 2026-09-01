@@ -45,6 +45,15 @@ a licensed engineer has reviewed and sealed it.
 
 THIRD-PARTY
 
-three.js -- MIT License -- https://github.com/mrdoob/three.js
-zod (dev) -- MIT License -- https://github.com/colinhacks/zod
-vite, vitest, typescript (dev) -- MIT License
+Runtime:
+  three.js -- MIT License -- https://github.com/mrdoob/three.js
+
+Development only (not shipped in the built app):
+  @types/three -- MIT License -- DefinitelyTyped
+  zod -- MIT License -- https://github.com/colinhacks/zod
+  happy-dom -- MIT License -- https://github.com/capricorn86/happy-dom
+  tsx -- MIT License -- https://github.com/privatenumber/tsx
+  vite, vitest, typescript -- MIT License
+
+No third-party source is vendored into this repository. Every dependency above
+is fetched by npm from its own publisher under its own licence.
