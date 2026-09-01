@@ -10,6 +10,46 @@ Live: **https://roadway-design-compiler.gandidhyaneswar.workers.dev**
 
 Built for the [OpenAI WebMCP Challenge](https://webmcp.devpost.com/).
 
+## Prior work and work added during the Submission Period
+
+This is a **pre-existing project meaningfully extended with WebMCP** during the
+Submission Period (25 August – 3 September 2026). Everything agent-facing was built
+inside that window. Stated plainly so it can be checked rather than taken on trust.
+
+**Existed before the Submission Period.** A deterministic roadway geometry kernel and
+the deliverable it produces — horizontal and vertical alignment, corridor sweep,
+template sections, design criteria, superelevation; the `RoadDesign` schema and its
+validation; the LandXML exporter; a form-driven Studio; and the RoadBench golden tests
+that reproduce two sealed GDOT projects. Its own record is in this repository and is
+dated: [`corpus/s1-spike-log.md`](corpus/s1-spike-log.md) documents the OpenRoads
+round-trip on 2026-06-11, and
+[`docs/GEOMETRY-AND-POSITIONING.md`](docs/GEOMETRY-AND-POSITIONING.md) carries the same
+date. At that point the project had no agent surface of any kind.
+
+**Added during the Submission Period.** The entire agent-facing half:
+
+- all **39 WebMCP tools** and the bridge that registers them, the typed refusals that
+  carry the numbers needed to resolve them, and the annotation policy;
+- the **agent-proposed change ledger** and the human confirmation gate — the boundary
+  this project exists to test, including the deliberate absence of any tool that clears it;
+- the agent activity log, design alternatives, and the portable design document that
+  carries a design, and its unconfirmed provenance, in a link;
+- LandXML **import** — alignments, TIN terrain, as-designed sections, survey plan
+  features — plus roadside furniture, the construction staking export, the coordinate
+  system module, the authored pavement structure, and surface appearance;
+- the 3D corridor view's ground, reference-surface and pavement rendering.
+
+**The evidence is the commit history.** The first published commit (30 August) bundles
+the pre-existing modules together with the first WebMCP layer; every commit after it is
+in-window work, visible one at a time. 49 of the repository's 112 files were added after
+that first commit, among them 18 test files and 17 driver scripts, 12 of which are
+end-to-end verification harnesses that drive the built app over CDP exactly as an agent
+would.
+
+Per the challenge rules, **only the work added during the Submission Period is offered
+for evaluation.** The kernel beneath it is prior work, and is included because the agent
+surface is meaningless without something real underneath it to be honest about.
+
 ---
 
 ## The idea
