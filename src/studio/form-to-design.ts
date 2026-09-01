@@ -6,6 +6,7 @@ import { parseRoadDesign } from "../schema/validate";
 import { computeHorizontal } from "../kernel/horizontal";
 import type { HorizontalElement, RoadDesign, SegmentMaterial, SuperelevationSpec } from "../schema/road-design";
 import type { RoadsideItem } from "../schema/roadside";
+import { projectCrsFor, type CrsSelection } from "./crs";
 
 export interface FormElementRow {
   kind: "tangent" | "arc" | "deflection";
@@ -30,10 +31,21 @@ export interface FormSegmentRow {
   material?: SegmentMaterial;
 }
 
+/** One authored pavement course, as the form holds it: strings from inputs. */
+export interface FormPavementLayerRow {
+  name: string;
+  /** Inches, as typed. Parsed and validated on the way to the design. */
+  thicknessIn: string;
+  /** Free text the engineer typed. Never inferred from the name. */
+  material?: string;
+}
+
 export interface FormTemplateRow {
   name: string;
   left: FormSegmentRow[];
   right: FormSegmentRow[];
+  /** Authored pavement structure, top course first. */
+  pavementLayers?: FormPavementLayerRow[];
 }
 
 /** Boundary model: drop row i runs from the previous row's boundary (or the
@@ -60,6 +72,15 @@ export interface StudioForm {
   superelevation?: SuperelevationSpec;
   /** Authored roadside furniture. */
   roadside?: RoadsideItem[];
+  /**
+   * The project coordinate reference system, as selected.
+   *
+   * Lives in the form so it rides the same write / ledger / undo / document
+   * path as everything else. Held as the SELECTION rather than the derived
+   * ProjectCrs so there is one source of truth and the zone table can change
+   * without rewriting saved documents.
+   */
+  crs?: CrsSelection;
 }
 
 function num(raw: string | undefined, label: string): number {
@@ -135,7 +156,23 @@ export function formToDesign(form: StudioForm): RoadDesign {
         slopePercent: num(s.slopePercent, `${tLabel} ${side} segment ${si + 1} slope`),
         ...(s.material ? { material: s.material } : {}),
       }));
-    templates[name] = { name, left: mapSide("left"), right: mapSide("right") };
+    // Pavement courses, in the order the engineer stated them. Thickness goes
+    // through the same num() as every other field, so a blank or non-numeric
+    // value fails by name rather than becoming NaN in the geometry.
+    const layers = (t.pavementLayers ?? []).map((L, li) => ({
+      name: L.name.trim(),
+      thicknessIn: num(L.thicknessIn, `${tLabel} pavement layer ${li + 1} thickness`),
+      ...(L.material && L.material.trim() !== "" ? { material: L.material.trim() } : {}),
+    }));
+    for (const [li, L] of layers.entries()) {
+      if (L.name === "") throw new Error(`${tLabel} pavement layer ${li + 1} name is required`);
+    }
+    templates[name] = {
+      name,
+      left: mapSide("left"),
+      right: mapSide("right"),
+      ...(layers.length > 0 ? { pavementLayers: layers } : {}),
+    };
   });
 
   // Drops are stationed by the alignment: boundaries between rows are the
@@ -168,6 +205,9 @@ export function formToDesign(form: StudioForm): RoadDesign {
 
   return parseRoadDesign({
     ...(form.superelevation ? { superelevation: form.superelevation } : {}),
+    // An unknown zone or an incomplete ground selection yields undefined, so the
+    // design simply carries no CRS rather than an authoritative-looking wrong one.
+    ...(projectCrsFor(form.crs) ? { crs: projectCrsFor(form.crs) } : {}),
     ...(form.roadside && form.roadside.length > 0 ? { roadside: form.roadside } : {}),
     name: form.name || "Unnamed Road",
     alignment: {

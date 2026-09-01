@@ -29,6 +29,8 @@
 
 import type { HorizontalElement, PVI } from "../schema/road-design";
 import { makeTin, type Tin, type TinFace, type TinPoint } from "../kernel/terrain";
+import { resolveSurfaceAppearance, type AuthoredMaterial,
+  type SurfaceMaterialUse } from "../viewer/surface-appearance";
 import { parseDesignSections, type DesignSectionSurface } from "./design-sections";
 import { parsePlanFeatures, type PlanFeatureSet } from "./plan-features";
 
@@ -55,7 +57,7 @@ export type ImportResult =
 
 const DEG = 180 / Math.PI;
 /** Survey feet per metre. */
-const FT_PER_M = 3.280833333333333;
+export const FT_PER_M = 3.280833333333333;
 
 function azimuthDeg(fromN: number, fromE: number, toN: number, toE: number): number {
   return ((Math.atan2(toE - fromE, toN - fromN) * DEG) % 360 + 360) % 360;
@@ -91,7 +93,15 @@ function byLocalName(root: Element | Document, name: string): Element[] {
   return Array.prototype.slice.call(root.getElementsByTagName(name)) as Element[];
 }
 
-function detectUnit(doc: Document): "foot" | "usSurveyFoot" | "meter" {
+/**
+ * The file's linear unit.
+ *
+ * Exported because anything reading a document OUTSIDE the main import path --
+ * a harness, a test against real files -- has to apply the same conversion.
+ * A verifier that assumed feet printed a metric file's 11.8 m widths as
+ * "11.8 ft" and looked plausible while being off by a factor of 3.28.
+ */
+export function detectUnit(doc: Document): "foot" | "usSurveyFoot" | "meter" {
   const imperial = byLocalName(doc, "Imperial")[0];
   if (imperial) {
     const u = (imperial.getAttribute("linearUnit") ?? "").toLowerCase();
@@ -154,7 +164,60 @@ function preflight(xml: string): ImportResult | undefined {
  * be positions. A face naming a point that is not there is skipped rather than
  * producing a triangle with a NaN corner.
  */
+/**
+ * The document-level MaterialTable, when a LandXML 2.0 file carries one.
+ *
+ * ⛔ Read exactly as written and never invented. A colour here is the
+ * designer's own; the app's job is to use it or to say why it could not.
+ */
+export function parseMaterials(doc: Document): AuthoredMaterial[] {
+  const out: AuthoredMaterial[] = [];
+  for (const el of byLocalName(doc, "Material")) {
+    // ⚠ Number(null) is 0, not NaN, so a Material with no index attribute used
+    // to become index 0 -- and would then answer a boundary referencing m="0".
+    const rawIndex = el.getAttribute("index");
+    if (rawIndex === null || rawIndex.trim() === "") continue;
+    const index = Number(rawIndex);
+    if (!Number.isInteger(index)) continue;
+    const raw = (el.getAttribute("color") ?? "").split(",").map((v) => Number(v.trim()));
+    const color = raw.length === 3 && raw.every((v) => Number.isFinite(v))
+      ? [raw[0]!, raw[1]!, raw[2]!] as const
+      : undefined;
+    const tex = el.getAttribute("textureImageRef") ?? undefined;
+    const sym = el.getAttribute("symbolRef") ?? undefined;
+    out.push({
+      index,
+      ...(color ? { color } : {}),
+      ...(tex ? { textureImageRef: tex } : {}),
+      ...(sym ? { symbolRef: sym } : {}),
+    });
+  }
+  return out;
+}
+
+/** Which materials a surface's own texture boundaries reference. */
+function surfaceMaterialUse(sEl: Element): SurfaceMaterialUse | undefined {
+  const seen = new Set<number>();
+  let regions = 0;
+  for (const b of byLocalName(sEl, "Boundary")) {
+    // ⚠ The same Number(null) === 0 trap as the material index, and it bites
+    // harder here: a Boundary with no `m` became a reference to material 0, so
+    // a file that happened to define material 0 had an unrelated region painted
+    // in it and LABELLED authored. A missing reference is not a reference to
+    // the zeroth thing.
+    const raw = b.getAttribute("m");
+    if (raw === null || raw.trim() === "") continue;
+    const m = Number(raw);
+    if (!Number.isInteger(m)) continue;
+    regions += 1;
+    seen.add(m);
+  }
+  if (regions === 0) return undefined;
+  return { indices: [...seen].sort((a, b) => a - b), regionCount: regions };
+}
+
 export function parseSurfaces(doc: Document, toFt = 1): Tin[] {
+  const materials = parseMaterials(doc);
   const out: Tin[] = [];
   for (const sEl of byLocalName(doc, "Surface")) {
     const name = sEl.getAttribute("name") || "surface";
@@ -182,7 +245,10 @@ export function parseSurfaces(doc: Document, toFt = 1): Tin[] {
       faces.push([a, b2, c]);
     }
     if (faces.length === 0) continue;
-    out.push(makeTin(name, points, faces));
+    const tin = makeTin(name, points, faces);
+    // Appearance travels WITH the surface, resolved once at import.
+    tin.appearance = resolveSurfaceAppearance(name, surfaceMaterialUse(sEl), materials);
+    out.push(tin);
   }
   return out;
 }

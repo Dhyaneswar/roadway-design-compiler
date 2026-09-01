@@ -26,13 +26,16 @@ import { alignmentRangeFromForm } from "./form-to-design";
 import type { FormElementRow, FormPviRow, StudioForm } from "./form-to-design";
 import { judgeCurveRadius, judgeGrade, judgeVerticalCurveK,
   type CriteriaBasis } from "../kernel/criteria";
-import { transitionFor } from "../kernel/superelevation";
-import type { SuperelevationSpec } from "../schema/road-design";
+import { transitionFor, crossSlopeAt,
+  type SuperelevationTransition } from "../kernel/superelevation";
+import type { RoadDesign, SuperelevationSpec } from "../schema/road-design";
 import { AiDesignProposal, proposalToForm } from "./ai-design";
 import { toStakingCsv, stakingRows } from "../exporters/staking";
 import { evaluateAlternatives, type AlternativeInput } from "./alternatives";
-import { fromDocument, toDocument } from "./design-document";
+import { fromDocument, toDocument,
+  type DesignDocument } from "./design-document";
 import { parseLandXML } from "../importers/landxml";
+import { crsSelectionProblem } from "./crs";
 import { summariseEarthwork, type GroundSample, type Tin } from "../kernel/terrain";
 import { checkRoadside, lengthOf, roadsideQuantities, type RoadsideItem } from "../schema/roadside";
 import type { DesignSectionSurface } from "../importers/design-sections";
@@ -81,7 +84,18 @@ export interface StudioHost {
    *  engineer confirmation. */
   writeForm(next: StudioForm, agentChange?: string): void;
   /** Agent-authored changes not yet confirmed by a human. */
-  pendingChanges(): readonly { readonly id: number; readonly description: string }[];
+  /**
+   * ⛔ `description` is CANONICAL: the words the tool used, with no origin
+   * label. The label belongs to presentation and is rendered from `inherited`.
+   * Baking it into the text put it in the portable document, which then carried
+   * a display string back in on the next open.
+   */
+  pendingChanges(): readonly {
+    readonly id: number;
+    readonly description: string;
+    /** True when this arrived already unconfirmed, from a link or a reload. */
+    readonly inherited?: boolean;
+  }[];
   /** Called for EVERY tool invocation. This is what proves, from inside the
    *  tool surface, that an agent used WebMCP rather than driving the DOM. */
   onToolCall?(tool: string, result: unknown): void;
@@ -101,8 +115,20 @@ export interface StudioHost {
   groundProfile(intervalFt?: number): GroundSample[] | undefined;
   /** A link that reproduces the current design exactly. */
   shareLink(): string;
-  /** Set the coordinate reference system by zone key, e.g. GA-West. */
-  setCrs(zone: string, basis: "grid" | "ground"): boolean;
+  /**
+   * Set the coordinate reference system by zone key, e.g. GA-West.
+   *
+   * `agentChange` records it in the change ledger, exactly as writeForm does, so
+   * the CRS participates in the same unconfirmed-change and undo workflow as
+   * everything else. Without it a CRS change bypassed the ledger entirely and
+   * undo silently acted on some older, unrelated change.
+   */
+  setCrs(
+    zone: string,
+    basis: "grid" | "ground",
+    combinedScaleFactor?: number,
+    agentChange?: string,
+  ): boolean;
   /** The CRS zone keys this app offers. */
   crsZones(): readonly { readonly value: string; readonly label: string }[];
   /** Put a set of alternatives in front of the engineer. Applies nothing.
@@ -116,6 +142,48 @@ export interface StudioHost {
   ): number;
   /** The selected coordinate reference system, so LandXML matches the app exactly. */
   readCrs(): unknown;
+  /**
+   * Which build is serving this page.
+   *
+   * Optional so a test host need not fake it. Without this an independent tester
+   * cannot tell which build answered -- a green result that cannot be attributed
+   * to a commit is not evidence of a fix.
+   */
+  buildInfo?(): { commit: string; builtAt: string };
+  /**
+   * Re-record changes a loaded document says were never confirmed.
+   *
+   * Optional so a test host need not fake it. Without it, loading a document
+   * through the tool surface keeps the incoming design but drops the fact that
+   * part of it was never reviewed -- the browser load path already carries it.
+   */
+  recordInherited?(descriptions: readonly string[]): void;
+  /**
+   * Names and counts of the imported context this design was worked against,
+   * whether or not it is currently loaded. Optional so a test host can skip it.
+   */
+  contextSummary?(): DesignDocument["context"];
+  /**
+   * Remember that a loaded document was worked against context we do not have,
+   * so the app can say so instead of reopening silently on missing ground.
+   */
+  setKnownMissingContext?(ctx: DesignDocument["context"]): void;
+  /**
+   * Replace imported context layers, recording it as an agent change.
+   *
+   * Only the keys present are replaced. `agentChange` puts it in the ledger so a
+   * context-only import can be undone -- it used to call the three setters
+   * directly, so a terrain-only commit left pending at zero and undo had nothing
+   * to act on while the new surface stayed loaded.
+   */
+  setImportedContext?(
+    ctx: {
+      terrain?: Tin;
+      planFeatures?: PlanFeatureSet;
+      designSections?: readonly DesignSectionSurface[];
+    },
+    agentChange?: string,
+  ): void;
 }
 
 /** Curve table rows, derived from element reports (PC = begin, PT = end). */
@@ -232,6 +300,103 @@ function readNumber(args: Record<string, unknown>, key: string): number | undefi
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
 
+/**
+ * The size of a string AS A FILE, in UTF-8 bytes.
+ *
+ * ⚠ String.length counts UTF-16 code units, which is not the size of anything
+ * written to disk. The baseline staking CSV reported 1180 while the file was
+ * 1186 bytes: every degree sign, en dash and accented place name in a survey
+ * costs bytes the count never saw. A field named lengthBytes has to be bytes.
+ */
+function utf8ByteLength(s: string): number {
+  return new TextEncoder().encode(s).length;
+}
+
+/**
+ * Roadside furniture a wholesale replacement is about to remove.
+ *
+ * Both destructive paths -- import_landxml with an alignment, and
+ * propose_full_design -- drop roadside items, because they are stationed
+ * against the road being replaced. That is intended. Being SILENT about it was
+ * not: the import path was fixed and the proposal path was left behind, so the
+ * disclosure lives here and both call it.
+ */
+function roadsideRemovedBy(current: StudioForm): {
+  removesRoadsideItems: number;
+  removedRoadside?: { id: string; kind: string; side: string;
+    beginStationFt: number; endStationFt: number }[];
+} {
+  const items = (current.roadside ?? []).map((r) => ({
+    id: r.id, kind: r.kind, side: r.side,
+    beginStationFt: r.beginStation, endStationFt: r.endStation,
+  }));
+  return {
+    removesRoadsideItems: items.length,
+    ...(items.length > 0 ? { removedRoadside: items } : {}),
+  };
+}
+
+/** How many station rows one read_ground reply carries. */
+const GROUND_PAGE = 60;
+
+/**
+ * One page of station samples, and the truth about the rest.
+ *
+ * ⚠ This used to be a bare `.slice(0, 60)`. The reply said `sampled: 106` and
+ * carried 60 rows ending at station 3950 on a road that runs to 6225.29, with
+ * nothing to say the tail was missing -- so an agent reading the last row
+ * believed it had reached the end of the road and reasoned about cut and fill
+ * that it had never been shown. Silently returning part of an answer is the
+ * same defect class as silently ignoring a parameter.
+ */
+function pageOf(rows: readonly GroundSample[], fromStationFt: number | undefined): {
+  samples: readonly GroundSample[];
+  returned: number;
+  returnedStationRangeFt: [number, number] | undefined;
+  complete: boolean;
+  nextFromStationFt?: number;
+  truncation?: string;
+} {
+  // ⚠ findIndex returns -1 for "no station at or after that one". Clamping it
+  // with Math.max(0, ...) turned that into index 0, so paging past the end of
+  // the road silently served page ONE again -- an agent walking the pages would
+  // loop forever and never learn it had finished.
+  const found = fromStationFt === undefined
+    ? 0
+    : rows.findIndex((r) => r.station >= fromStationFt - 1e-6);
+  const from = found === -1 ? rows.length : found;
+  const page = rows.slice(from, from + GROUND_PAGE);
+  const complete = from + page.length >= rows.length;
+  const next = complete ? undefined : rows[from + page.length]!.station;
+  if (page.length === 0) {
+    return {
+      samples: page,
+      returned: 0,
+      returnedStationRangeFt: undefined,
+      complete: true,
+      truncation:
+        `No stations at or after ${fromStationFt}. The sampled road ends at ` +
+        `${rows.length > 0 ? rows[rows.length - 1]!.station : "no stations"}; ` +
+        "you have already seen the last page.",
+    };
+  }
+  return {
+    samples: page,
+    returned: page.length,
+    returnedStationRangeFt: page.length > 0
+      ? [page[0]!.station, page[page.length - 1]!.station]
+      : undefined,
+    complete,
+    ...(next !== undefined ? { nextFromStationFt: next } : {}),
+    ...(complete ? {} : {
+      truncation:
+        `This reply carries ${page.length} of ${rows.length} stations, ending at ` +
+        `${page[page.length - 1]!.station}. Call again with fromStationFt: ${next} for the ` +
+        `next page, or ask for a wider intervalFt to see the whole road in one reply.`,
+    }),
+  };
+}
+
 
 /**
  * Tool annotation policy, in one place so it can be read as a policy rather than
@@ -288,6 +453,10 @@ const ANNOTATIONS: Readonly<Record<string, WebMcpToolAnnotations>> = {
   set_horizontal_element: { title: "Change an element", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   set_pvi: { title: "Change a PVI", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   set_template_segment: { title: "Change a template segment", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+  // Destructive: it REPLACES a template's whole stack, so the previous one is
+  // gone. Idempotent: the same stack applied twice is the same stack.
+  set_pavement_layers: { title: "Set the pavement structure", readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+  read_pavement_layers: { title: "Read the pavement structure", readOnlyHint: true, idempotentHint: true },
   set_template_drop: { title: "Change a template drop", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   set_superelevation: { title: "Set superelevation policy", readOnlyHint: false, destructiveHint: false, idempotentHint: true },
 
@@ -336,6 +505,10 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
       const form = host.readForm();
       const built = tryBuild(form);
       return {
+        // Which build answered. A tester cannot attribute a result to a fix
+        // without this, and hashing the tool catalogue only fingerprints the
+        // contract -- two different builds with identical tool shapes hash the same.
+        build: host.buildInfo?.() ?? { commit: "unknown", builtAt: "unknown" },
         project: {
           name: form.name, beginStationFt: form.beginStation,
           startEastingFt: form.startE, startNorthingFt: form.startN,
@@ -497,19 +670,57 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
       "the runoff begins, full banking is reached at the PC, held to the PT, and released. " +
       "Also reports the cross slope of each side at any station you ask about.",
     S.obj({
-      atStation: S.num("Optional station in feet to report the left and right cross slope at."),
+      atStation: S.num(
+        "Optional station in feet. Returns the left and right cross slope THERE, plus which " +
+          "phase of the rotation that station is in -- normal crown, runout, runoff, or full " +
+          "super. Must lie within the alignment, and is range-checked even when no banking " +
+          "policy is set. ⛔ With NO policy there is no banking anywhere, so no slopes are " +
+          "returned: the cross slope is then the template's own and read_cross_section reports " +
+          "the actual section.",
+      ),
     }),
-    () => {
+    (args) => {
       const form = host.readForm();
+      const askedAt = readNumber(args, "atStation");
       if (!form.superelevation) {
-        return { enabled: false,
-          note: "No superelevation policy. Call set_superelevation to bank the curves." };
+        // ⚠ atStation is still VALIDATED with no policy, and the reply says where
+        // the cross slope actually comes from. It used to return one generic note
+        // for any station, in range or not, while the schema promised slopes
+        // there -- so 999, 1000 and 6226 were indistinguishable.
+        if (askedAt !== undefined) {
+          const r = alignmentRangeFromForm(form);
+          if (askedAt < r.begin - 1e-6 || askedAt > r.end + 1e-6) {
+            return {
+              refused: true,
+              code: "StationOutsideAlignment",
+              detail: `Station ${askedAt} is outside the alignment, which runs ${r.begin} to ` +
+                `${Number(r.end.toFixed(4))} ft.`,
+              measurements: { requestedStationFt: askedAt,
+                beginStationFt: r.begin, endStationFt: Number(r.end.toFixed(4)) },
+              resolvedBy: ["read_alignment_range"],
+              authority: ["Alignment extents"],
+            };
+          }
+        }
+        return {
+          enabled: false,
+          ...(askedAt !== undefined ? { atStationFt: askedAt } : {}),
+          note:
+            "No superelevation policy, so there is no banking to report" +
+            (askedAt !== undefined
+              ? ` at station ${askedAt} or anywhere else. With no policy the cross slope is the` +
+                " template's own, unchanged along the road -- read_cross_section returns the"
+              : ". With no policy the cross slope is the template's own -- read_cross_section" +
+                " returns the") +
+            " actual section. Call set_superelevation to bank the curves.",
+          resolvedBy: ["read_cross_section", "set_superelevation"],
+        };
       }
       const built = tryBuild(form);
       if (isRefusal(built)) return built;
       const h = computeHorizontal(built.design.alignment);
       const spec = form.superelevation;
-      const transitions: unknown[] = [];
+      const transitions: SuperelevationTransition[] = [];
       h.elements.forEach((report, i) => {
         if (report.type !== "arc" || report.curve === undefined) return;
         const authored = built.design.alignment.elements[i];
@@ -521,7 +732,45 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
           pcStation: report.beginStation, ptStation: report.endStation,
         }, i, spec));
       });
-      return { enabled: true, policy: spec, transitions };
+
+      // ⚠ atStation was declared, documented -- "the cross slope of each side at
+      // any station you ask about" -- and then dropped: this handler took no
+      // args at all, so 0 and 750 returned byte-identical policy objects. The
+      // kernel had crossSlopeAt() the whole time; nothing called it from here.
+      const atStation = askedAt;
+      if (atStation === undefined) {
+        return { enabled: true, policy: spec, transitions };
+      }
+      const range = alignmentRangeFromForm(form);
+      if (atStation < range.begin - 1e-6 || atStation > range.end + 1e-6) {
+        return {
+          refused: true,
+          code: "StationOutsideAlignment",
+          detail:
+            `Station ${atStation} is outside the alignment, which runs ${range.begin} to ` +
+            `${Number(range.end.toFixed(4))} ft. There is no cross slope there to report.`,
+          measurements: { requestedStationFt: atStation,
+            beginStationFt: range.begin, endStationFt: Number(range.end.toFixed(4)) },
+          resolvedBy: ["read_alignment_range"],
+          authority: ["Alignment extents"],
+        };
+      }
+      const at = crossSlopeAt(atStation, transitions, spec);
+      return {
+        enabled: true,
+        policy: spec,
+        transitions,
+        atStation: {
+          stationFt: at.station,
+          phase: at.phase,
+          leftPercent: at.leftPercent,
+          rightPercent: at.rightPercent,
+          curveIndex: at.curveIndex,
+        },
+        note:
+          `At station ${at.station} the section is in "${at.phase}": left ${at.leftPercent}%, ` +
+          `right ${at.rightPercent}%. Negative is falling away from the centreline.`,
+      };
     },
   );
 
@@ -537,7 +786,15 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
       const pending = host.pendingChanges();
       return {
         pendingCount: pending.length,
-        pending: pending.map((c) => ({ id: c.id, description: c.description })),
+        pending: pending.map((c) => ({
+          id: c.id,
+          description: c.description,
+          inherited: c.inherited === true,
+          // Rendered here, from the flag -- never stored in the description.
+          origin: c.inherited === true
+            ? "arrived already unconfirmed from a link or a reload; you have not reviewed it"
+            : "authored in this session",
+        })),
         deliverableBlocked: pending.length > 0,
         note: pending.length === 0
           ? "Nothing outstanding. The design is confirmed and can be exported."
@@ -689,10 +946,16 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
       }
       const includeOffsets = args.includeOffsets !== false;
       const opts = { intervalFt: interval, includeOffsets };
+      // ⛔ One source. The CRS rides the form into the design, so this export,
+      // the LandXML, the saved document and the Studio's own download all read
+      // the same value. They used to disagree: the human download passed a CRS
+      // the tool path never did, so the agent's CSV said "CRS not set" while the
+      // LandXML carried EPSG:2240.
       const rows = stakingRows(built.design, opts);
       const csv = toStakingCsv(built.design, opts);
       return { pointCount: rows.length, intervalFt: interval, includeOffsets,
-        lengthBytes: csv.length, csv };
+        coordinateSystem: built.design.crs ?? null,
+        lengthBytes: utf8ByteLength(csv), lengthChars: csv.length, csv };
     },
   );
 
@@ -706,11 +969,52 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
     () => {
       const form = host.readForm();
       const built = tryBuild(form);
+      // The document carries what is still UNCONFIRMED. A design handed on with
+      // that stripped arrives looking reviewed, which is how unconfirmed agent
+      // work would reach a deliverable through a link.
+      const unconfirmed = host.pendingChanges().map((c) => c.description);
+      const url = host.shareLink();
+      // ⛔ The document must carry the context summary too. It was built without
+      // it, so a design read as JSON, loaded elsewhere and re-shared lost all
+      // trace of the ground it was fitted to -- while the share URL beside it
+      // carried it. Two serialisations of one design disagreeing is the same
+      // defect as two exports disagreeing about the CRS.
+      // ⛔ The document carries the context summary too. It was built without
+      // it, so a design read as JSON, loaded elsewhere and re-shared lost all
+      // trace of the ground it was fitted to -- while the share URL beside it
+      // carried it. Two serialisations of one design disagreeing is the same
+      // defect as two exports disagreeing about the CRS.
+      const doc = toDocument(form, undefined, unconfirmed, host.contextSummary?.());
       return {
-        document: toDocument(form),
-        shareUrl: host.shareLink(),
+        document: doc,
+        designedAgainstContext: doc.context,
+        shareUrl: url,
+        shareUrlLength: url.length,
+        // ⚠ A link long enough to carry a design can disable WebMCP on the page
+        // it opens. Measured on one browser connector: a 64 KiB configuration
+        // budget, with the page URL repeated once per tool -- so at 37 tools
+        // every URL character costs 37 bytes and the ceiling arrives at ~814
+        // characters. A design fragment is 1,300+.
+        //
+        // This is not something the page can shrink its way out of: with every
+        // tool description removed the ceiling would still be ~1,771 characters,
+        // below the smallest real design link. Reported rather than worked
+        // around, because the design itself travels fine -- it is the AGENT
+        // surface on the recipient's page that may not come with it.
+        agentSurfaceOnSharedPage:
+          url.length > 800
+            ? "The design in this link opens and edits normally in the Studio, but the link is " +
+              "long enough that some browser connectors will refuse to enable WebMCP on the page " +
+              "it opens -- an agent may not be able to drive the design there. Hand the link to " +
+              "a person; do not assume you can follow it."
+            : "short enough that the agent surface should come with it",
         valid: !isRefusal(built),
-        note: "The link carries the design in the fragment, which browsers never send to a server.",
+        unconfirmedCarried: unconfirmed.length,
+        note: "The link carries the design in the fragment, which browsers never send to a server." +
+          (unconfirmed.length > 0
+            ? ` It also carries ${unconfirmed.length} unconfirmed change(s): whoever opens it sees` +
+              " them as still awaiting a licensed engineer, because your confirmation is not theirs."
+            : ""),
       };
     },
   );
@@ -738,8 +1042,40 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
           authority: ["RoadDesign document v1"],
         };
       }
-      return applyOrPreview(host, loaded.form, args.commit === true,
+      const result = applyOrPreview(host, loaded.form, args.commit === true,
         loaded.savedAt ? `loaded a design saved ${loaded.savedAt}` : "loaded a design");
+      if (isRefusal(result)) return result;
+      if (args.commit === true && loaded.unconfirmed.length > 0) {
+        host.recordInherited?.(loaded.unconfirmed);
+      }
+      // The incoming design's context summary comes with it: this app does not
+      // have that ground, and the engineer needs to know the design was fitted
+      // to it. Parsed here since v2 and previously thrown away.
+      if (args.commit === true && loaded.context !== undefined) {
+        host.setKnownMissingContext?.(loaded.context);
+      }
+      return {
+        ...(result as object),
+        // ⚠ Recounted AFTER the inherited entries land. applyOrPreview reports
+        // the count as it stood when it ran, so the reply said 2 while
+        // read_pending_changes said 4 a moment later. A tool that disagrees with
+        // the reader about the gate is worse than one that stays quiet.
+        ...(args.commit === true
+          ? { pendingEngineerConfirmation: host.pendingChanges().length }
+          : {}),
+        inheritsUnconfirmed: loaded.unconfirmed.length,
+        ...(loaded.context !== undefined ? { designedAgainstContext: loaded.context } : {}),
+        ...(loaded.unconfirmed.length > 0
+          ? {
+              inheritedUnconfirmed: loaded.unconfirmed,
+              note:
+                `That document carries ${loaded.unconfirmed.length} change(s) its author had not ` +
+                "had confirmed. They stay unconfirmed here: a confirmation belongs to the " +
+                "engineer who gave it, on the design they were looking at. The deliverable " +
+                "remains blocked until a licensed engineer confirms them in this Studio.",
+            }
+          : {}),
+      };
     },
   );
 
@@ -751,14 +1087,26 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
       "offers. Grid coordinates are state-plane; ground coordinates are scaled to surface " +
       "distances, which is what a survey crew measures.",
     S.obj({
-      zone: S.str("Zone key, e.g. GA-West. Get the list from read_coordinate_systems."),
+      zone: S.str(
+        "Zone key, e.g. GA-West. Get the list from read_coordinate_systems. Pass an EMPTY " +
+          "STRING for local coordinates -- no georeferencing, which is what the Studio's " +
+          "\"None\" option selects.",
+      ),
       basis: S.enum(["grid", "ground"], "Grid (state plane) or ground (surface) distances."),
+      combinedScaleFactor: S.num(
+        "REQUIRED when basis is \"ground\": ground distances are grid distances divided by " +
+          "this. Ground coordinates without it cannot be reconciled with a grid or with what " +
+          "a survey crew measures, and the schema refuses them.",
+      ),
       commit: S.commit,
     }, ["zone"]),
     (args) => {
       const zone = String(args.zone ?? "");
       const known = host.crsZones().map((z) => z.value);
-      if (!known.includes(zone)) {
+      // "" is local coordinates, which the Studio offers as "None". Refusing it
+      // here left the human able to choose something the agent could not --
+      // a parity breach in the direction that is easy to miss.
+      if (zone !== "" && !known.includes(zone)) {
         return {
           refused: true,
           code: "UnknownCoordinateZone",
@@ -770,15 +1118,40 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
         };
       }
       const basis = args.basis === "ground" ? "ground" : "grid";
+      const csf = readNumber(args, "combinedScaleFactor");
+      // ⛔ A ground CRS with no scale factor is refused rather than written and
+      // left to fail later. The UI had no control for it at all, so "ground"
+      // produced a coordinate system the app's own schema rejects -- it only
+      // escaped because the CRS never reached the design to be validated.
+      const problem = crsSelectionProblem({ zone, basis, ...(csf !== undefined
+        ? { combinedScaleFactor: csf } : {}) });
+      if (problem) {
+        return {
+          refused: true,
+          code: basis === "ground" && csf === undefined
+            ? "GroundBasisNeedsScaleFactor" : "InvalidCoordinateSystem",
+          detail: problem,
+          measurements: { ...(csf !== undefined ? { combinedScaleFactor: csf } : {}) },
+          resolvedBy: ["set_coordinate_system"],
+          authority: ["RoadDesign v0.2 crs"],
+        };
+      }
+
+      const change = zone === ""
+        ? "coordinate system cleared to local coordinates"
+        : `coordinate system ${zone} (${basis}` +
+          `${csf !== undefined ? `, CSF ${csf}` : ""})`;
       if (args.commit !== true) {
-        return { previewed: true, committed: false, change: `coordinate system ${zone} (${basis})`,
+        return { previewed: true, committed: false, change,
           note: "Nothing changed. Call again with commit: true to apply." };
       }
-      const ok = host.setCrs(zone, basis);
+      const ok = host.setCrs(zone, basis, csf, change);
       return ok
-        ? { committed: true, change: `coordinate system ${zone} (${basis})`,
+        ? { committed: true, change,
             provenance: AGENT_PROVENANCE,
-            note: "The LandXML export will now georeference to this zone." }
+            pendingEngineerConfirmation: host.pendingChanges().length,
+            note: "Both exports and the saved design document now carry this coordinate " +
+              "system. It is stamped agent-proposed and undo_last_change reverts it." }
         : { error: true, code: "BridgeFault", detail: "the CRS control rejected that value" };
     },
   );
@@ -824,15 +1197,47 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
           authority: ["LandXML 1.1 / 1.2"],
         };
       }
+      const committing = args.commit === true;
+
+      // Which CONTEXT LAYERS does this file actually carry?
+      //
+      // A file replaces the layers it has and leaves the others alone. Terrain,
+      // site features and as-designed sections routinely arrive in SEPARATE
+      // files -- ground from one export, the survey from another -- so wiping a
+      // layer because a different file happens to lack it destroys imported work
+      // for no engineering reason. Terrain was already guarded this way; the
+      // other two were not, which is exactly how an alignment-only import
+      // silently cleared an imported survey.
+      const carries = {
+        terrain: parsed.surfaces.length > 0,
+        siteFeatures: parsed.planFeatures.features.length > 0,
+        designSections: parsed.designSections.length > 0,
+      };
+      const applyContext = (agentChange?: string): void => {
+        const ctx = {
+          ...(carries.terrain ? { terrain: parsed.surfaces[0]! } : {}),
+          ...(carries.siteFeatures ? { planFeatures: parsed.planFeatures } : {}),
+          ...(carries.designSections ? { designSections: parsed.designSections } : {}),
+        };
+        if (host.setImportedContext) {
+          host.setImportedContext(ctx, agentChange);
+          return;
+        }
+        // Hosts that predate the transactional setter still get the layers.
+        if (ctx.terrain) host.setTerrain(ctx.terrain);
+        if (ctx.planFeatures) host.setPlanFeatures(ctx.planFeatures);
+        if (ctx.designSections) host.setDesignSections(ctx.designSections);
+      };
+      const contextLayers = {
+        replaces: Object.entries(carries).filter(([, v]) => v).map(([k]) => k),
+        leavesAlone: Object.entries(carries).filter(([, v]) => !v).map(([k]) => k),
+      };
+
       // A file with no alignment still carries CONTEXT worth having: a survey is
       // mostly plan features, and a terrain export is mostly a surface. Refusing
       // it for want of an alignment threw away the whole reason to open it.
       if (parsed.alignments.length === 0) {
         const tin = parsed.surfaces[0];
-        if (tin) host.setTerrain(tin);
-        host.setDesignSections(parsed.designSections);
-        host.setPlanFeatures(parsed.planFeatures);
-
         const loaded: string[] = [];
         if (tin) loaded.push(`ground surface "${tin.name}" (${tin.faces.length} triangles)`);
         if (parsed.planFeatures.features.length > 0) {
@@ -851,14 +1256,39 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
             authority: ["LandXML 1.1 / 1.2"],
           };
         }
-        return {
-          committed: true,
-          change: `loaded ${loaded.join(" and ")}`,
+
+        const report = {
           groundSurface: tin
             ? { name: tin.name, triangles: tin.faces.length, points: tin.points.length }
             : undefined,
           siteFeatures: parsed.planFeatures.features.length,
           siteExtentFt: parsed.planFeatures.bounds,
+          designSectionSurfaces: parsed.designSections.length,
+          contextLayers,
+        };
+
+        // ⚠ This branch used to load the context and report committed: true
+        // whatever `commit` said, so a preview mutated the page. Preview is the
+        // default for every other write tool in this surface; an import that
+        // ignores it is not a lesser bug for being an import.
+        if (!committing) {
+          return {
+            previewed: true,
+            committed: false,
+            change: `would load ${loaded.join(" and ")}`,
+            ...report,
+            note:
+              "Nothing changed. Call again with commit: true to apply. That file carries no " +
+              "alignment, so committing loads context only -- the site as it already is -- and " +
+              "leaves the design untouched.",
+          };
+        }
+        applyContext(`loaded ${loaded.join(" and ")}`);
+        return {
+          committed: true,
+          change: `loaded ${loaded.join(" and ")}`,
+          pendingEngineerConfirmation: host.pendingChanges().length,
+          ...report,
           provenance: AGENT_PROVENANCE,
           note:
             "That file carried context but no alignment, so nothing was designed -- this is the " +
@@ -881,10 +1311,6 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
           authority: ["LandXML 1.1 / 1.2"],
         };
       }
-
-      if (parsed.surfaces.length > 0) host.setTerrain(parsed.surfaces[0]!);
-      host.setDesignSections(parsed.designSections);
-      host.setPlanFeatures(parsed.planFeatures);
 
       const current = host.readForm();
       // A profile must span the alignment; an imported file often carries none, or
@@ -922,10 +1348,29 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
         drops: current.drops,
       };
 
-      const result = applyOrPreview(host, next, args.commit === true,
+      // ⛔ A new alignment brings a new station range, so roadside furniture
+      // stationed against the OLD one cannot be carried across: a guardrail at
+      // 20+00-34+00 may not exist on the road that replaces it. Clearing is the
+      // honest default for a destructive replacement -- but it must be SAID, in
+      // the preview as well as the commit, and not discovered afterwards.
+      const removed = roadsideRemovedBy(current);
+      const droppedRoadside = removed.removedRoadside ?? [];
+
+      const result = applyOrPreview(host, next, committing,
         `imported "${picked.name}" from LandXML`);
-      return isRefusal(result) ? result : {
+      if (isRefusal(result)) return result;
+      // Context follows the SAME preview/commit contract as the geometry, and
+      // only after the write has been validated and proved to round-trip. It
+      // used to run before this call and unconditionally, so a preview replaced
+      // the terrain and the survey it was only supposed to describe.
+      // No agentChange here: applyOrPreview already recorded this import, and its
+      // snapshot was taken before the context moved, so one undo puts both back.
+      if (committing) applyContext();
+
+      return {
         ...(result as object),
+        contextLayers,
+        ...removed,
         importedFrom: {
           alignmentName: picked.name,
           alignmentsInFile: parsed.alignments.map((a) => a.name),
@@ -938,6 +1383,14 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
               ? ["the file carried no usable profile; a flat placeholder was seeded, author the real one"]
               : []),
             "cross-section templates are yours, not the file's -- LandXML alignments carry none",
+            ...(droppedRoadside.length > 0
+              ? [`${droppedRoadside.length} roadside item(s) are stationed against the road being ` +
+                 `replaced and are REMOVED by this import; undo_last_change restores them`]
+              : []),
+            ...(contextLayers.leavesAlone.length > 0
+              ? [`this file carries no ${contextLayers.leavesAlone.join(", ")}; those layers are ` +
+                 `left exactly as they are rather than cleared`]
+              : []),
           ],
         },
       };
@@ -954,9 +1407,21 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
       "road can run past the edge of a survey, and inventing ground there is how a design gets " +
       "built wrong. Requires a ground surface: import one with import_landxml.",
     S.obj({
-      intervalFt: S.num("Station interval to sample at. Default 50."),
+      fromStationFt: S.num(
+        "Start the returned rows at this station. Replies carry at most " + String(GROUND_PAGE) +
+          " stations; when the road needs more, the reply says so and gives the station to " +
+          "resume from. The summary figures always describe the WHOLE road, not the page.",
+      ),
+      intervalFt: S.num(
+        "Station interval to sample at, in feet. Default 50. Stations land on whole multiples " +
+          "of this from the begin station -- 50 gives 25+00, 25+50, 26+00 -- the way cross " +
+          "sections are cut on a plan set. The end station is always sampled, so the LAST " +
+          "interval is usually shorter than the rest. Sampling is capped at 400 stations, so on " +
+          "a long road the step is widened to fit; intervalFt in the reply is the step actually " +
+          "used and requestedIntervalFt is what was asked for.",
+      ),
     }),
-    () => {
+    (args) => {
       const tin = host.terrain();
       if (!tin) {
         return {
@@ -970,19 +1435,47 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
           authority: ["Existing ground"],
         };
       }
-      const samples = host.groundProfile();
+      // A nonsense interval is refused rather than quietly replaced by the default:
+      // an agent that asked for 0 ft and silently got 50 ft would report a spacing
+      // it never requested and cannot detect.
+      const requested = readNumber(args, "intervalFt");
+      if (requested !== undefined && !(requested > 0)) {
+        return { error: true, code: "BadArgument",
+          detail: "intervalFt must be greater than zero." };
+      }
+      const intervalFt = requested ?? 50;
+      const samples = host.groundProfile(intervalFt);
       if (!samples) {
         return { error: true, code: "BridgeFault", detail: "ground could not be sampled" };
       }
       const summary = summariseEarthwork(samples);
+      // The station cap can widen the spacing past what was asked for. Measure what
+      // actually came back rather than echoing the request: reporting a 25 ft
+      // interval while serving 50 ft is the failure this tool already had once.
+      const effectiveFt = samples.length >= 2
+        ? Number((samples[1]!.station - samples[0]!.station).toFixed(3))
+        : undefined;
+      const widened = effectiveFt !== undefined && effectiveFt > intervalFt + 1e-6;
       return {
         surface: { name: tin.name, triangles: tin.faces.length, points: tin.points.length },
+        requestedIntervalFt: intervalFt,
+        intervalFt: effectiveFt,
         ...summary,
-        note: summary.offSurface > 0
-          ? `${summary.offSurface} of ${summary.sampled} stations fall outside the surveyed ` +
-            `surface and report no ground.`
-          : "Every station sits on the surveyed surface.",
-        samples: samples.filter((s) => s.cutFillFt !== undefined).slice(0, 60),
+        note: [
+          summary.offSurface > 0
+            ? `${summary.offSurface} of ${summary.sampled} stations fall outside the surveyed ` +
+              `surface and report no ground.`
+            : "Every station sits on the surveyed surface.",
+          widened
+            ? `Sampling is capped at 400 stations, so the ${intervalFt} ft interval you asked ` +
+              `for was widened to ${effectiveFt} ft.`
+            : undefined,
+        ].filter(Boolean).join(" "),
+        // ⛔ Off-surface stations are RETURNED, not filtered out. The tool's own
+        // description promises they "report no ground rather than a guess", and
+        // dropping them broke that: a road running past the edge of a survey
+        // came back as a shorter road with no gap in it.
+        ...pageOf(samples, readNumber(args, "fromStationFt")),
       };
     },
   );
@@ -999,11 +1492,41 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
       const b = tin.bounds;
       const samples = host.groundProfile();
       const off = samples ? samples.filter((s) => s.groundZ === undefined).length : undefined;
+      const app = tin.appearance;
       return {
         loaded: true,
         name: tin.name,
         triangles: tin.faces.length,
         points: tin.points.length,
+        // What the file said about how this surface looks, and what was done
+        // with it. Held so a reference that cannot be painted is still visible
+        // rather than silently dropped.
+        appearance: app ? {
+          source: app.source,
+          colorHex: `#${app.colorHex.toString(16).padStart(6, "0")}`,
+          note: app.note,
+          authoredMaterialRegions: app.regionCount,
+          // Two DIFFERENT facts, kept apart: what this surface's boundaries
+          // point at, and what the file declares. A file can declare a
+          // symbol-only material no boundary uses, and reporting only the
+          // referenced subset made it vanish.
+          authoredMaterials: app.authoredMaterials?.map((m) => ({
+            index: m.index,
+            color: m.color ? `rgb(${m.color.join(",")})` : undefined,
+            textureImageRef: m.textureImageRef,
+            symbolRef: m.symbolRef,
+            rendered: app.source === "authored-material" && !!m.color,
+          })),
+          declaredMaterials: app.declaredMaterials?.map((m) => ({
+            index: m.index,
+            color: m.color ? `rgb(${m.color.join(",")})` : undefined,
+            textureImageRef: m.textureImageRef,
+            symbolRef: m.symbolRef,
+            referencedByThisSurface:
+              (app.authoredMaterials ?? []).some((r) => r.index === m.index),
+          })),
+          declaredMaterialCount: app.declaredMaterials?.length,
+        } : undefined,
         boundsFt: {
           northing: [b.minN, b.maxN], easting: [b.minE, b.maxE], elevation: [b.minZ, b.maxZ],
         },
@@ -1188,10 +1711,22 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
           offsetRangeFt: [d.minOffsetFt, d.maxOffsetFt],
           elevationRangeFt: [d.minElevationFt, d.maxElevationFt],
           looksLikeRoadway: d.maxWidthFt < 200,
+          // The designer's own point codes, verbatim, with the uncoded count
+          // beside them. On the measured file one surface carries 2,873 coded
+          // points and 221 uncoded, and another carries 4,499 with no code at
+          // all -- a reader that only reported codes would describe the second
+          // surface as having nothing on it.
+          pointCodes: d.codes,
+          codedPointCount: d.codedPointCount,
+          uncodedPointCount: d.uncodedPointCount,
+          displayedInViewer: d.maxWidthFt < 200,
         })),
         note:
           "looksLikeRoadway is a width test, not a reading of the name -- surface names are in " +
-          "whatever language the designer used.",
+          "whatever language the designer used. Point codes are carried EXACTLY as written and " +
+          "are never interpreted: they group and label, and nothing maps a code to a material or " +
+          "an engineering meaning. Only roadway-width surfaces are drawn in the 3D view; the " +
+          "rest are parsed and reported here.",
       };
     },
   );
@@ -1340,9 +1875,37 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
         name: built.design.name,
         alignment: built.design.alignment,
         profile: built.design.profile,
-        crs: host.readCrs() as never,
+        // From the DESIGN, not from a separate host call. The CRS is part of the
+        // form now, so formToDesign has already put it here and validated it.
+        crs: built.design.crs as never,
       });
-      return { lengthBytes: xml.length, landxml: xml };
+      // ⛔ Authored pavement layers are NOT in the file, and that is said out
+      // loud. LandXML 1.2 has no standard place for a course stack, and
+      // inventing a vendor Property to claim export support would produce a
+      // file that only this app can read while looking like an interchange.
+      const stacked = built.design.templates
+        ? Object.values(built.design.templates).filter((t) => (t.pavementLayers?.length ?? 0) > 0)
+        : [];
+      return {
+        lengthBytes: utf8ByteLength(xml),
+        lengthChars: xml.length,
+        ...(stacked.length > 0
+          ? {
+              omittedFromFile: {
+                pavementLayers: stacked.map((t) => ({
+                  template: t.name,
+                  layerCount: t.pavementLayers!.length,
+                })),
+                why:
+                  "LandXML 1.2 has no standard element for an authored pavement course stack. " +
+                  "Rather than invent a vendor-specific property that only this app could read, " +
+                  "the layers are left out of the file. They remain in the design, in the shared " +
+                  "document and in read_pavement_layers.",
+              },
+            }
+          : {}),
+        landxml: xml,
+      };
     },
   );
 
@@ -1409,8 +1972,21 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
         templates: current.templates,
         drops: current.drops.length > 0 ? current.drops : proposed.drops,
       };
+      const removed = roadsideRemovedBy(current);
       const result = applyOrPreview(host, next, args.commit === true, "propose full design");
-      return isRefusal(result) ? result : { ...(result as object), rationale: parsed.data.rationale };
+      return isRefusal(result) ? result : {
+        ...(result as object),
+        rationale: parsed.data.rationale,
+        ...removed,
+        ...(removed.removesRoadsideItems > 0
+          ? {
+              note:
+                `⛔ This replaces the road wholesale, so ${removed.removesRoadsideItems} ` +
+                "roadside item(s) stationed against the current alignment are REMOVED. " +
+                "undo_last_change restores them.",
+            }
+          : {}),
+      };
     },
   );
 
@@ -1521,8 +2097,12 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
       "K guidance: at 45 mph aim for K of at least 61 on crests and 79 in sags, and scale with speed.",
     S.obj({
       index: S.int("1-based index of the PVI."),
-      stationFt: S.num("New PVI station in feet."),
-      elevationFt: S.num("New PVI elevation in feet."),
+      stationFt: S.num(
+        "New PVI station in feet. ⛔ NOT settable on the FIRST or LAST PVI: those are derived " +
+          "from the alignment, and passing a different value is refused rather than quietly " +
+          "normalised. Change the road's begin station or its element lengths instead.",
+      ),
+      elevationFt: S.num("New PVI elevation in feet. Settable on every PVI, endpoints included."),
       curveLengthFt: S.num("New vertical curve length in feet. Use 0 to remove the curve."),
       commit: S.commit,
     }, ["index"]),
@@ -1533,7 +2113,43 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
         return outOfRange("PVI", i + 1, next.pvis.length, ["read_design", "read_profile_table"]);
       }
       const row = next.pvis[i]!;
-      const sta = readNumber(args, "stationFt"); if (sta !== undefined) row.station = String(sta);
+      const sta = readNumber(args, "stationFt");
+
+      // ⛔ The first and last PVI stations are DERIVED from the alignment -- the
+      // profile is stationed BY the road it describes -- so they are not
+      // independently settable. This used to accept the value, write it, have it
+      // normalised back on the way through, and report `committed: true` with
+      // the saved endpoint unchanged: a no-op disguised as an honoured request.
+      // Refuse instead, and say which number would actually move it.
+      const isEndpoint = i === 0 || i === next.pvis.length - 1;
+      if (sta !== undefined && isEndpoint) {
+        const range = alignmentRangeFromForm(next);
+        const derived = i === 0 ? range.begin : range.end;
+        if (Math.abs(sta - derived) > 0.01) {
+          return {
+            refused: true,
+            code: "DerivedStationNotSettable",
+            detail:
+              `PVI ${i + 1} is the ${i === 0 ? "first" : "last"} PVI, so its station is derived ` +
+              `from the alignment and is ${Number(derived.toFixed(4))} ft, not ${sta}. The ` +
+              `profile is stationed by the road it describes. To move it, change the road: ` +
+              `the begin station, or the element lengths that set where it ends.`,
+            measurements: {
+              requestedStationFt: sta,
+              derivedStationFt: Number(derived.toFixed(4)),
+              differenceFt: Number((sta - derived).toFixed(4)),
+              beginStationFt: range.begin,
+              endStationFt: Number(range.end.toFixed(4)),
+            },
+            resolvedBy: i === 0
+              ? ["set_project_setup"]
+              : ["set_horizontal_element", "add_horizontal_element", "remove_horizontal_element"],
+            authority: ["Profile is stationed by the alignment"],
+          };
+        }
+      }
+
+      if (sta !== undefined) row.station = String(sta);
       const el = readNumber(args, "elevationFt"); if (el !== undefined) row.elevation = String(el);
       const L = readNumber(args, "curveLengthFt");
       if (L !== undefined) row.curveLength = L === 0 ? "" : String(L);
@@ -1616,6 +2232,143 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
       const w = readNumber(args, "widthFt"); if (w !== undefined) seg.width = String(w);
       const sp = readNumber(args, "slopePercent"); if (sp !== undefined) seg.slopePercent = String(sp);
       return applyOrPreview(host, next, args.commit === true, `set ${args.template} ${side} segment ${i + 1}`);
+    },
+  );
+
+  add(
+    "read_pavement_layers",
+    "Read the AUTHORED pavement structure of every template: the ordered courses an engineer " +
+      "stated, top course first, with each thickness in inches exactly as authored and the total. " +
+      "⛔ Nothing here is designed or recommended. This app does not compute a required " +
+      "structure, a structural number, a pavement life, or compliance with any standard -- it " +
+      "reports what a person stated and what it adds up to. A template with no stack has not had " +
+      "one authored; that is not a claim that it needs none.",
+    S.obj({}),
+    () => {
+      const form = host.readForm();
+      return {
+        templates: form.templates.map((t) => {
+          const layers = (t.pavementLayers ?? []).map((L) => ({
+            name: L.name,
+            thicknessIn: Number(L.thicknessIn),
+            material: L.material && L.material.trim() !== "" ? L.material : undefined,
+          }));
+          return {
+            template: t.name,
+            layerCount: layers.length,
+            layers,
+            totalThicknessIn: layers.reduce((a, L) => a + L.thicknessIn, 0),
+            authored: layers.length > 0,
+          };
+        }),
+        note:
+          "Order is the structure, top course first. Thicknesses are inches, exactly as " +
+          "authored. NO structural adequacy was calculated: this is a record of what the " +
+          "engineer stated, not an assessment of whether it is sufficient.",
+        authority: ["Authored by the engineer; not a pavement design"],
+      };
+    },
+  );
+
+  add(
+    "set_pavement_layers",
+    "Replace one template's COMPLETE ordered pavement structure. Give the courses top first, " +
+      "each with a name and a thickness in inches, and optionally the material as free text. " +
+      "⛔ DESTRUCTIVE: this replaces the whole stack, it does not merge into it. Preview " +
+      "first (omit commit). An EMPTY array is a deliberate remove-all. " +
+      "⛔ This is AUTHORING, not designing. Do not propose a structure as though the app had " +
+      "computed one: thicknesses come from the engineer or from a standard they are applying, " +
+      "and nothing here checks adequacy. Material is free text and is never inferred from a " +
+      "layer's name. Duplicate names are allowed -- order is what identifies a course.",
+    S.obj({
+      template: S.str("Which template's structure to replace. See read_design or read_pavement_layers."),
+      layers: {
+        type: "array",
+        description:
+          "The complete stack, TOP COURSE FIRST. Each item is " +
+          "{name, thicknessIn, material?}. thicknessIn is inches and must be greater than zero. " +
+          "An empty array removes every layer.",
+        items: { type: "object" },
+      },
+      commit: S.commit,
+    }, ["template", "layers"]),
+    (args) => {
+      const next = clone(host.readForm());
+      const name = String(args.template ?? "");
+      const ti = next.templates.findIndex((t) => t.name === name);
+      if (ti < 0) {
+        return {
+          refused: true,
+          code: "TemplateNotFound",
+          detail: `No template called "${name}".`,
+          measurements: { templateCount: next.templates.length },
+          available: next.templates.map((t) => t.name),
+          resolvedBy: ["read_design", "read_pavement_layers"],
+          authority: ["RoadDesign v0.2 templates"],
+        };
+      }
+      if (!Array.isArray(args.layers)) {
+        return { error: true, code: "BadArgument",
+          detail: "layers must be an array; pass [] to remove every layer." };
+      }
+
+      const rows: { name: string; thicknessIn: string; material?: string }[] = [];
+      for (const [i, raw] of (args.layers as unknown[]).entries()) {
+        if (typeof raw !== "object" || raw === null) {
+          return { error: true, code: "BadArgument",
+            detail: `layer ${i + 1} is not an object.` };
+        }
+        const L = raw as Record<string, unknown>;
+        const lname = typeof L.name === "string" ? L.name.trim() : "";
+        if (lname === "") {
+          return { error: true, code: "BadArgument",
+            detail: `layer ${i + 1} needs a name -- the engineer's own word for the course.` };
+        }
+        const th = L.thicknessIn;
+        if (typeof th !== "number" || !Number.isFinite(th) || th <= 0) {
+          return {
+            refused: true,
+            code: "PavementThicknessNotPositive",
+            detail: `Layer ${i + 1} ("${lname}") has thickness ${String(th)}. A course must ` +
+              "have a finite thickness greater than zero: a zero or negative course is not a " +
+              "thin course, and this app never supplies one for you.",
+            measurements: { layerIndex: i + 1, thicknessIn: typeof th === "number" ? th : null },
+            resolvedBy: ["set_pavement_layers"],
+            authority: ["RoadDesign v0.2 pavement layer"],
+          };
+        }
+        const mat = typeof L.material === "string" && L.material.trim() !== ""
+          ? L.material.trim() : undefined;
+        rows.push({ name: lname, thicknessIn: String(th), ...(mat ? { material: mat } : {}) });
+      }
+
+      const before = next.templates[ti]!.pavementLayers ?? [];
+      if (rows.length > 0) next.templates[ti]!.pavementLayers = rows;
+      else delete next.templates[ti]!.pavementLayers;
+
+      const total = rows.reduce((a, L) => a + Number(L.thicknessIn), 0);
+      const what = rows.length > 0
+        ? `set ${rows.length} pavement layer(s) on "${name}"`
+        : `removed all pavement layers from "${name}"`;
+      const result = applyOrPreview(host, next, args.commit === true, what);
+      return isRefusal(result) ? result : {
+        ...(result as object),
+        template: name,
+        replacedLayerCount: before.length,
+        layers: rows.map((L) => ({
+          name: L.name, thicknessIn: Number(L.thicknessIn), material: L.material,
+        })),
+        totalThicknessIn: total,
+        note:
+          "Authored, not designed. No structural adequacy, pavement life, structural number or " +
+          "standard compliance was calculated. " +
+          (before.length > 0 && rows.length > 0
+            ? `The previous ${before.length}-layer stack was replaced, not merged; ` +
+              "undo_last_change restores it."
+            : before.length > 0
+              ? `All ${before.length} layer(s) were removed; undo_last_change restores them.`
+              : ""),
+      };
     },
   );
 

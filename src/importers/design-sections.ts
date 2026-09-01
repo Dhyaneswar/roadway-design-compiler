@@ -21,6 +21,17 @@ export interface SectionPointRaw {
   /** Offset from the alignment centreline, ft. Sign as the file gave it. */
   offsetFt: number;
   elevationFt: number;
+  /**
+   * The designer's own point code, EXACTLY as written -- "KS", "SR", "BUSS".
+   *
+   * ⛔ Never interpreted. These are project abbreviations: they mean one thing
+   * on the file they were measured on and something else on the next, so they
+   * are carried through as opaque strings for grouping and shown verbatim in a
+   * legend. Undefined where the file gave no code, which is common -- on the
+   * measured file one surface has 2,873 coded points and another has 4,499
+   * with none at all.
+   */
+  code?: string;
 }
 
 export interface DesignSectionAtStation {
@@ -41,6 +52,10 @@ export interface DesignSectionSurface {
   maxOffsetFt: number;
   minElevationFt: number;
   maxElevationFt: number;
+  /** Distinct point codes on this surface, sorted. Empty when none are coded. */
+  codes: string[];
+  codedPointCount: number;
+  uncodedPointCount: number;
 }
 
 const num = (v: string | null | undefined): number | undefined => {
@@ -80,7 +95,12 @@ export function parseDesignSections(
       for (const p of find(surf, "CrossSectPnt")) {
         const parts = (p.textContent ?? "").trim().split(/\s+/).map(Number);
         if (parts.length < 2 || !Number.isFinite(parts[0]!) || !Number.isFinite(parts[1]!)) continue;
-        points.push({ offsetFt: parts[0]! * toFt, elevationFt: parts[1]! * toFt });
+        const code = (p.getAttribute("code") ?? "").trim();
+        points.push({
+          offsetFt: parts[0]! * toFt,
+          elevationFt: parts[1]! * toFt,
+          ...(code !== "" ? { code } : {}),
+        });
       }
       if (points.length < 2) continue;
 
@@ -107,9 +127,22 @@ export function parseDesignSections(
       }
       if (hi - lo > maxW) maxW = hi - lo;
     }
+    // Codes are counted across the WHOLE surface, coded and uncoded alike: a
+    // surface where most points carry no code has to be able to say so.
+    const codeSet = new Set<string>();
+    let coded = 0, uncoded = 0;
+    for (const run of runs) {
+      for (const p of run.points) {
+        if (p.code === undefined) uncoded += 1;
+        else { coded += 1; codeSet.add(p.code); }
+      }
+    }
     out.push({
       name,
       runs,
+      codes: [...codeSet].sort(),
+      codedPointCount: coded,
+      uncodedPointCount: uncoded,
       stationCount: stations.size,
       maxWidthFt: Number(maxW.toFixed(3)),
       minOffsetFt: Number(minO.toFixed(3)),

@@ -14,7 +14,10 @@ import type { RoadDesign } from "../src/schema/road-design";
 import type { Tin } from "../src/kernel/terrain";
 import { buildRoadsideGeometry } from "../src/viewer/roadside-mesh";
 import { buildDesignSectionMesh } from "../src/viewer/design-section-mesh";
+import { buildPavementMeshes, pavementLayerColors } from "../src/viewer/pavement-mesh";
 import type { DesignSectionSurface } from "../src/importers/design-sections";
+import { assignSurfaceColors,
+  type SurfaceAppearance } from "../src/viewer/surface-appearance";
 import type { PlanFeatureSet } from "../src/importers/plan-features";
 
 const SECTION_INTERVAL_FT = 25;
@@ -33,6 +36,15 @@ export interface Viewer3D {
   setExaggeration(factor: number): void;
   /** Start/stop the render loop (stop when the view is hidden). */
   setActive(active: boolean): void;
+  /**
+   * Frame the imported ground rather than the road.
+   *
+   * Terrain that does not overlap the alignment is drawn where it really is,
+   * which can be miles away -- the camera is fitted to the corridor, so the
+   * engineer sees an empty view and concludes the import failed. Returns how
+   * far the ground sits from the road, or undefined when there is none.
+   */
+  fitToGround(): { offsetFt: number; name: string } | undefined;
 }
 
 export interface LegendEntry {
@@ -83,7 +95,9 @@ export function createViewer(
 
   const camera = new THREE.PerspectiveCamera(50, 1, 1, 100_000);
   const renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(window.devicePixelRatio);
+  // Capped at 2: past that the backing buffer grows quadratically for detail no
+  // one can see, and a corridor mesh is already the expensive thing on the page.
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   container.appendChild(renderer.domElement);
 
   const controls = new OrbitControls(camera, renderer.domElement);
@@ -140,11 +154,64 @@ let designSectionSurfaces: readonly DesignSectionSurface[] = [];
 let sitePlanFeatures: PlanFeatureSet | undefined;
 /** Existing site linework: cool and thin, so the design reads over it. */
 const siteFeatureMaterial = new THREE.LineBasicMaterial({ color: 0x6f8fa8 });
-/** Warm and translucent, so the app's own corridor still reads on top of it. */
-const designSectionMaterial = new THREE.MeshStandardMaterial({
-  color: 0xc08a4a, roughness: 0.85, metalness: 0, side: THREE.DoubleSide,
-  transparent: true, opacity: 0.55,
-});
+/**
+ * Reference surfaces get their OWN colour, not one shared constant.
+ *
+ * ⛔ Every imported reference surface used to share a single translucent brown,
+ * so a file carrying five distinct surfaces -- pavement, wearing course,
+ * terrace, rock, soil -- rendered as one indistinguishable mass. The colour
+ * comes from the surface's resolved appearance: its authored material where the
+ * file states one, otherwise a stable identity colour derived from its name.
+ * Translucency is kept so the app's own corridor still reads on top.
+ */
+/**
+ * A reference surface's display appearance.
+ *
+ * A DesignCrossSectSurf is not a TIN and carries no MaterialTable of its own,
+ * so it falls to surface identity plus whatever its point codes say. The label
+ * is built here so the legend and the mesh cannot disagree about it.
+ */
+function surfaceLook(
+  surf: DesignSectionSurface,
+  colours: Map<string, number>,
+): SurfaceAppearance & { codeNote?: string } {
+  const colorHex = colours.get(surf.name) ?? 0x8b949e;
+  const coded = surf.codes.length;
+  return {
+    colorHex,
+    label: surf.name,
+    source: "surface-identity",
+    codeNote: coded > 0
+      ? `${coded} point code(s): ${surf.codes.join(", ")}` +
+        (surf.uncodedPointCount > 0 ? ` · ${surf.uncodedPointCount} uncoded points` : "")
+      : `no point codes · ${surf.uncodedPointCount} uncoded points`,
+  };
+}
+
+/** Pavement courses are solid, unlike the translucent reference surfaces. */
+const pavementMaterials = new Map<number, THREE.MeshStandardMaterial>();
+function pavementMaterial(colorHex: number): THREE.MeshStandardMaterial {
+  const cached = pavementMaterials.get(colorHex);
+  if (cached) return cached;
+  const made = new THREE.MeshStandardMaterial({
+    color: colorHex, roughness: 0.95, metalness: 0, side: THREE.DoubleSide,
+  });
+  pavementMaterials.set(colorHex, made);
+  return made;
+}
+
+const referenceMaterials = new Map<number, THREE.MeshStandardMaterial>();
+function referenceMaterial(colorHex: number): THREE.MeshStandardMaterial {
+  let m = referenceMaterials.get(colorHex);
+  if (!m) {
+    m = new THREE.MeshStandardMaterial({
+      color: colorHex, roughness: 0.85, metalness: 0, side: THREE.DoubleSide,
+      transparent: true, opacity: 0.55,
+    });
+    referenceMaterials.set(colorHex, m);
+  }
+  return m;
+}
 let terrainMesh: THREE.Mesh | undefined;
 
 /** Earth-toned, matte, and drawn slightly back so the road reads on top of it. */
@@ -158,6 +225,21 @@ const terrainMaterial = new THREE.MeshStandardMaterial({
   polygonOffsetFactor: 1,
   polygonOffsetUnits: 1,
 });
+
+/** Ground materials, one per authored colour, cached like the reference ones. */
+const groundMaterials = new Map<number, THREE.MeshStandardMaterial>();
+function groundMaterialFor(tin: Tin): THREE.MeshStandardMaterial {
+  const hexColor = tin.appearance?.source === "authored-material"
+    ? tin.appearance.colorHex : undefined;
+  if (hexColor === undefined) return terrainMaterial;
+  const cached = groundMaterials.get(hexColor);
+  if (cached) return cached;
+  const made = terrainMaterial.clone();
+  made.color.setHex(hexColor);
+  groundMaterials.set(hexColor, made);
+  return made;
+}
+
 
 /**
  * Build the ground mesh in the corridor's own local frame.
@@ -193,7 +275,10 @@ function buildTerrainMesh(tin: Tin, origin: { e: number; n: number; z: number },
   geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
   geo.setIndex(idx);
   geo.computeVertexNormals();
-  return new THREE.Mesh(geo, terrainMaterial);
+  // The surface's own colour when the file authored one, otherwise the shared
+  // earth tone. A 2.0 file that states its ground is grey should not be drawn
+  // in an invented brown just because that is what ground usually looks like.
+  return new THREE.Mesh(geo, groundMaterialFor(tin));
 }
   let fitted = false;
   let lastDesignForTerrain: RoadDesign | undefined;
@@ -235,7 +320,13 @@ let meshData: CorridorMesh | null = null;
   function resize(): void {
     const w = container.clientWidth || 1;
     const h = container.clientHeight || 1;
-    renderer.setSize(w, h, false);
+    // ⚠ updateStyle MUST be true. setSize(w, h, false) leaves the canvas with no
+    // CSS size of its own, so the element lays out at its BACKING-BUFFER size --
+    // which setPixelRatio has already multiplied by devicePixelRatio. On a 1.5x
+    // display a 1280x720 viewport got an 1897x945 canvas and the page overflowed
+    // in both directions. Backing resolution and CSS layout size are different
+    // things and only one of them belongs in the layout.
+    renderer.setSize(w, h, true);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
   }
@@ -419,12 +510,51 @@ let meshData: CorridorMesh | null = null;
         }
         geo.addGroup(g.start, g.count, matIndex.get(g.kind)!);
       }
-      onLegend(
-        [...matIndex.entries()].map(([name, mi]) => ({
-          name,
-          color: `#${roadMaterials[mi]!.color.getHexString()}`,
-        })),
+      // One assignment across the whole set, so no two reference surfaces can
+      // land on the same colour -- "Teoretisk" and "Berg" collide when each is
+      // hashed on its own, which is two of five surfaces drawn identically.
+      const referenceColours = assignSurfaceColors(
+        designSectionSurfaces.filter((s) => s.maxWidthFt < 200).map((s) => s.name),
       );
+
+      // ⛔ The legend names the SOURCE of every colour. A reader must be able to
+      // tell an authored material from a display identity from a code category;
+      // a colour whose origin cannot be stated is a guess wearing a legend.
+      const legend: LegendEntry[] = [...matIndex.entries()].map(([name, mi]) => ({
+        name,
+        color: `#${roadMaterials[mi]!.color.getHexString()}`,
+      }));
+      if (terrainTin) {
+        const a = terrainTin.appearance;
+        // The regions and texture names the file authored, said out loud even
+        // when they cannot be painted. Holding a reference and never showing it
+        // is indistinguishable from having dropped it.
+        const detail = a?.source === "authored-material"
+          ? "authored material"
+          : a?.regionCount
+            ? `identity — ${a.regionCount} authored regions, ` +
+              `${a.authoredMaterials?.length ?? 0} materials not painted`
+            : "identity";
+        legend.push({
+          name: `ground: ${terrainTin.name} (${detail})`,
+          color: `#${groundMaterialFor(terrainTin).color.getHexString()}`,
+        });
+      }
+      for (const surf of designSectionSurfaces) {
+        if (surf.maxWidthFt >= 200) continue;
+        const look = surfaceLook(surf, referenceColours);
+        legend.push({
+          // Identity colour plus RAW code metadata. Deliberately not a
+          // per-code categorical view: the mesh is one colour per surface, so
+          // claiming code colours here would describe something not drawn.
+          name: `reference: ${look.label} (identity)` +
+            (surf.codes.length > 0
+              ? ` — codes ${surf.codes.join(", ")} · ${surf.codedPointCount} coded`
+              : " — no codes") +
+            (surf.uncodedPointCount > 0 ? ` · ${surf.uncodedPointCount} uncoded` : ""),
+          color: `#${look.colorHex.toString(16).padStart(6, "0")}`,
+        });
+      }
       roadMesh = new THREE.Mesh(geo, roadMaterials);
       group.add(roadMesh);
 
@@ -456,7 +586,8 @@ let meshData: CorridorMesh | null = null;
         dg.setAttribute("position", new THREE.Float32BufferAttribute(dm.positions, 3));
         dg.setIndex(dm.indices);
         dg.computeVertexNormals();
-        group.add(new THREE.Mesh(dg, designSectionMaterial));
+        const look = surfaceLook(surf, referenceColours);
+        group.add(new THREE.Mesh(dg, referenceMaterial(look.colorHex)));
       }
 
       // Roadside furniture: guardrail, barrier, curb and markings, each swept
@@ -477,6 +608,30 @@ let meshData: CorridorMesh | null = null;
         }
       }
 
+      // The AUTHORED pavement structure, hanging under the running surface at
+      // true thickness. Each course gets its own colour from a palette assigned
+      // across the whole stack, so no two courses collide -- and the colours
+      // distinguish courses only, never imply a material.
+      const stacks = buildPavementMeshes(design, meshData.origin, SECTION_INTERVAL_FT);
+      const stackColours = pavementLayerColors(stacks.length);
+      stacks.forEach((L, i) => {
+        if (L.indices.length === 0) return;
+        const pg = new THREE.BufferGeometry();
+        pg.setAttribute("position", new THREE.Float32BufferAttribute(L.positions, 3));
+        pg.setIndex(L.indices);
+        pg.computeVertexNormals();
+        const colour = stackColours[i]!;
+        group.add(new THREE.Mesh(pg, pavementMaterial(colour)));
+        legend.push({
+          // Exact authored name and inch value, verbatim.
+          name: `pavement: ${L.name} ${L.thicknessIn}"` +
+            (L.material ? ` (${L.material})` : "") + " — authored",
+          color: `#${colour.toString(16).padStart(6, "0")}`,
+        });
+      });
+
+      onLegend(legend);
+
       // Ground goes in last, in the road's frame, reaching a little past the
       // corridor so the road is seen sitting in the landscape rather than on a
       // postage stamp of it.
@@ -489,6 +644,20 @@ let meshData: CorridorMesh | null = null;
         }
         const reach = Math.max(600, far * 1.35);
         terrainMesh = buildTerrainMesh(terrainTin, meshData.origin, reach);
+        // ⛔ Ground that does not reach the road is still ground. The reach
+        // filter exists to stop a county-wide survey shrinking the road to a
+        // speck, but when it keeps NOTHING the result was an import that
+        // reported 25,140 triangles and drew nothing at all -- indistinguishable
+        // from a parsing failure. Draw it where it really is instead, and let
+        // fitToGround take the engineer to it.
+        if (!terrainMesh) {
+          const b = terrainTin.bounds;
+          const cE = (b.minE + b.maxE) / 2, cN = (b.minN + b.maxN) / 2;
+          const radius = Math.hypot(b.maxE - cE, b.maxN - cN);
+          const away = Math.hypot(cE - meshData.origin.e, cN - meshData.origin.n);
+          terrainMesh = buildTerrainMesh(terrainTin, meshData.origin, away + radius + 1);
+          if (terrainMesh) terrainMesh.userData.offRoad = away;
+        }
         if (terrainMesh) group.add(terrainMesh);
       } else {
         terrainMesh = undefined;
@@ -567,6 +736,24 @@ let meshData: CorridorMesh | null = null;
       for (const { sprite, baseH } of labelSprites) sprite.scale.y = baseH / factor;
       if (snapLocal && snapMarker.visible) placeMarker(snapMarker, snapLocal);
       if (pinLocal && pinMarker.visible) placeMarker(pinMarker, pinLocal);
+    },
+    fitToGround(): { offsetFt: number; name: string } | undefined {
+      if (!terrainMesh || !terrainTin) return undefined;
+      const box = new THREE.Box3().setFromObject(terrainMesh);
+      if (box.isEmpty()) return undefined;
+      const centre = box.getCenter(new THREE.Vector3());
+      const size = box.getSize(new THREE.Vector3());
+      const d = Math.max(size.x, size.z, 100);
+      camera.position.set(centre.x - d * 0.35, centre.y + d * 0.45, centre.z + d * 0.45);
+      camera.near = d / 1000;
+      camera.far = d * 20;
+      camera.updateProjectionMatrix();
+      controls.target.copy(centre);
+      controls.update();
+      return {
+        offsetFt: Number((terrainMesh.userData.offRoad ?? 0).toFixed(2)),
+        name: terrainTin.name,
+      };
     },
     setActive(active: boolean): void {
       if (active) {

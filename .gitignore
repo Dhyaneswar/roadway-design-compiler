@@ -3,3 +3,21 @@ out/
 *.tsbuildinfo
 .gstack/
 studio/dist/
+
+# Session handoff notes. Local only -- never published.
+.session/
+
+# Strategy notes and the video script. Local only -- never published.
+SUBMISSION.md
+
+# Local agent instructions. Points at the private handoff -- not for the export.
+CLAUDE.md
+
+# Screenshots the verify harnesses drop in the repo root. Evidence, not source.
+*.png
+!out/*.png
+
+# June-era working notes. Local only -- never published.
+# Holds a personal legal position, founder desk tasks, local data paths and
+# state that contradicts the README. It was tracked for months by accident.
+HANDOFF.md

@@ -57,10 +57,19 @@ const templateSegment = z.object({
   material: segmentMaterial.optional(),
 });
 
+const pavementLayer = z.object({
+  name: z.string().min(1),
+  // Positive and finite: a zero or negative course is not a thin course, it is
+  // a mistake, and NaN/Infinity must never reach geometry.
+  thicknessIn: z.number().positive().finite(),
+  material: z.string().min(1).optional(),
+});
+
 const template = z.object({
   name: z.string().min(1),
   left: z.array(templateSegment),
   right: z.array(templateSegment),
+  pavementLayers: z.array(pavementLayer).optional(),
 });
 
 const drop = z.object({

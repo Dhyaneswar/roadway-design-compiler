@@ -27,6 +27,32 @@ export interface AgentChange {
    * on purpose: the ledger is about authority, not about roadway geometry.
    */
   readonly before?: unknown;
+  /**
+   * True when this records work that arrived ALREADY unconfirmed -- carried in
+   * from a shared document or restored after a reload -- rather than a change
+   * made here.
+   *
+   * It still blocks the deliverable: unreviewed work is unreviewed whoever
+   * authored it. But it is NOT a transaction, so it is never the target of an
+   * undo and must never sit in front of one. Entries like this used to pile up
+   * on top of the stack with no snapshot, and undoLast refused on the topmost
+   * one -- so a design that arrived with inherited provenance could never be
+   * undone at all.
+   */
+  readonly inherited?: boolean;
+  /**
+   * For an inherited entry, the id of the transaction that brought it in.
+   *
+   * Undoing that transaction discards the document it loaded, so the provenance
+   * that arrived WITH it goes too -- otherwise the ledger keeps describing a
+   * terrain and a guardrail that are no longer anywhere, and the deliverable
+   * stays blocked by work that has already been thrown away.
+   *
+   * Undefined for provenance that was already present -- restored after a reload
+   * or opened from a link. That is not owned by any transaction here and must
+   * survive every undo, because nothing in this session reviewed it.
+   */
+  readonly introducedBy?: number;
 }
 
 export class AgentChangeLedger {
@@ -34,13 +60,21 @@ export class AgentChangeLedger {
   private nextId = 1;
 
   /** Record an agent-authored change as pending confirmation. */
-  record(description: string, before?: unknown, now: Date = new Date()): AgentChange {
+  record(
+    description: string,
+    before?: unknown,
+    now: Date = new Date(),
+    inherited = false,
+    introducedBy?: number,
+  ): AgentChange {
     const change: AgentChange = {
       id: this.nextId++,
       description,
       at: now.toISOString(),
       confirmed: false,
       before,
+      ...(inherited ? { inherited: true } : {}),
+      ...(introducedBy !== undefined ? { introducedBy } : {}),
     };
     this.changes.push(change);
     return change;
@@ -49,6 +83,15 @@ export class AgentChangeLedger {
   /** The most recent change, confirmed or not. */
   last(): AgentChange | undefined {
     return this.changes[this.changes.length - 1];
+  }
+
+  /** The most recent real TRANSACTION, ignoring inherited provenance. */
+  lastTransaction(): AgentChange | undefined {
+    for (let i = this.changes.length - 1; i >= 0; i -= 1) {
+      const c = this.changes[i]!;
+      if (c.inherited !== true) return c;
+    }
+    return undefined;
   }
 
   /**
@@ -62,11 +105,21 @@ export class AgentChangeLedger {
   undoLast():
     | { ok: true; change: AgentChange; before: unknown }
     | { ok: false; reason: "nothing-to-undo" | "last-change-confirmed"; change?: AgentChange } {
-    const change = this.last();
-    if (!change) return { ok: false, reason: "nothing-to-undo" };
+    // The most recent real TRANSACTION, stepping over inherited provenance.
+    // Those carry no snapshot and describe somebody else's unreviewed work, so
+    // they are not undoable and must not shadow the change beneath them.
+    let i = this.changes.length - 1;
+    while (i >= 0 && this.changes[i]!.inherited === true) i -= 1;
+    if (i < 0) return { ok: false, reason: "nothing-to-undo" };
+    const change = this.changes[i]!;
     if (change.confirmed) return { ok: false, reason: "last-change-confirmed", change };
     if (change.before === undefined) return { ok: false, reason: "nothing-to-undo", change };
-    this.changes.pop();
+    this.changes.splice(i, 1);
+    // Take the provenance this transaction introduced with it. Leaving it behind
+    // orphans the ledger: both real transactions undone, nothing on the page,
+    // and entries still describing the discarded document's terrain and
+    // guardrail while the deliverable stays blocked by them.
+    this.changes = this.changes.filter((c) => c.introducedBy !== change.id);
     return { ok: true, change, before: change.before };
   }
 

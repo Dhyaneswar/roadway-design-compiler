@@ -11,18 +11,19 @@ import { registerWebMcp } from "../src/studio/webmcp-bridge";
 import { AgentChangeLedger } from "../src/studio/agent-changes";
 import { AgentActivityLog, classifyResult } from "../src/studio/agent-activity";
 import { AlternativeSet, evaluateAlternatives, type AlternativeInput } from "../src/studio/alternatives";
-import { autosave, decodeFragment, loadAutosave, shareUrl } from "../src/studio/design-document";
+import { autosave, decodeFragment, loadAutosave, shareUrl,
+  type DesignDocument } from "../src/studio/design-document";
 import { parseLandXML } from "../src/importers/landxml";
 import type { DesignSectionSurface } from "../src/importers/design-sections";
 import type { PlanFeatureSet } from "../src/importers/plan-features";
 import { TinSampler, sampleGround, summariseEarthwork, type Tin } from "../src/kernel/terrain";
-import { sampleAlignment as sampleAlign } from "../src/kernel/sample";
 import { transitionFor } from "../src/kernel/superelevation";
 import { sampleAlignment, sampleProfile } from "../src/kernel/sample";
 import { azimuthToBearing, degreesToDms } from "../src/util/angle";
 import { createViewer, type LegendEntry, type Viewer3D } from "./viewer3d";
 import type { RoadDesign, SuperelevationSpec } from "../src/schema/road-design";
 import type { RoadsideItem } from "../src/schema/roadside";
+import { CRS_ZONES, projectCrsFor, type CrsSelection } from "../src/studio/crs";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -76,6 +77,16 @@ let terrainSampler: TinSampler | undefined;
 let designSections: readonly DesignSectionSurface[] = [];
 // The existing site, when a survey was imported.
 let planFeatures: PlanFeatureSet | undefined;
+/**
+ * Context a design was worked against that is NOT loaded here.
+ *
+ * ⛔ Held separately from the live geometry on purpose. It used to be read off
+ * the loaded context alone, so the first refresh after a reload -- when nothing
+ * is loaded -- persisted an EMPTY summary over the real one, and the warning
+ * appeared once and never again. Knowing the ground is missing has to outlive
+ * not having it.
+ */
+let knownMissingContext: DesignDocument["context"] | undefined;
 
 function setTerrain(tin: Tin | undefined): void {
   terrain = tin;
@@ -95,12 +106,50 @@ function groundProfile(design: RoadDesign, intervalFt = 50) {
   const h = computeHorizontal(design.alignment);
   const v = computeVertical(design.profile);
   const begin = design.alignment.beginStation;
-  const count = Math.min(400, Math.max(2, Math.ceil(h.length / intervalFt)));
-  const pts = sampleAlign(design.alignment, count);
+
+  // Stations land on WHOLE MULTIPLES of the interval, measured from the begin
+  // station -- 25+00, 25+25, 25+50 -- which is how cross sections are cut on a
+  // plan set. An earlier version divided the alignment into equal parts instead,
+  // so a 25 ft request came back at 24.94: a reasonable spacing, but not 25 ft
+  // stations, and not what the parameter says.
+  //
+  // The end station is always sampled, so the final interval is usually partial.
+  // The station cap widens the step when a road is too long to sample at the
+  // interval asked for; read_ground reports the step it actually used.
+  const CAP = 400;
+
+  /**
+   * How many stations a given step really produces — INCLUDING the endpoint
+   * appended when the road does not divide evenly.
+   *
+   * ⚠ The widening test has to count that endpoint. An earlier version compared
+   * only the regular stations against the cap, so a 9,980 ft road at 25 ft
+   * passed the test with 400 on-grid stations and then appended a 401st five
+   * feet later — one past the ceiling the tool documents. The failure needs
+   * floor(length/interval) to land exactly on CAP-1 with a remainder, which is
+   * why it survived a 30,000 ft cap test and a 3,170 ft partial-endpoint test.
+   */
+  const countFor = (s: number): number => {
+    const whole = Math.floor(h.length / s + 1e-9);
+    const exact = Math.abs(whole * s - h.length) < 1e-6;
+    return whole + 1 + (exact ? 0 : 1);
+  };
+
+  // Widening to length/(CAP-1) makes the road an exact multiple of the step, so
+  // no endpoint is appended and the count lands on CAP exactly.
+  const step = countFor(intervalFt) > CAP ? h.length / (CAP - 1) : intervalFt;
+
+  const stations: number[] = [];
+  const whole = Math.floor(h.length / step + 1e-9);
+  for (let i = 0; i <= whole; i += 1) stations.push(begin + i * step);
+  if (stations[stations.length - 1]! < begin + h.length - 1e-6) {
+    stations.push(begin + h.length);
+  }
+
   return sampleGround(
     terrainSampler,
-    pts.map((p, i) => {
-      const station = begin + (h.length * i) / (pts.length - 1 || 1);
+    stations.map((station) => {
+      const p = h.pointAt(station - begin);
       return { station, n: p.n, e: p.e, designZ: v.elevationAt(station) };
     }),
   );
@@ -119,7 +168,38 @@ function readForm(): StudioForm {
     drops,
     ...(superelevation ? { superelevation } : {}),
     ...(roadside.length > 0 ? { roadside } : {}),
+    crs: readCrsSelection(),
   };
+}
+
+/** The CRS exactly as selected, straight out of the controls. */
+function readCrsSelection(): CrsSelection {
+  const csfRaw = ($<HTMLInputElement>("crsCsf")?.value ?? "").trim();
+  const csf = csfRaw === "" ? undefined : Number(csfRaw);
+  return {
+    zone: $<HTMLSelectElement>("crsZone").value,
+    basis: $<HTMLSelectElement>("crsBasis").value as "grid" | "ground",
+    ...(csf !== undefined && Number.isFinite(csf) ? { combinedScaleFactor: csf } : {}),
+  };
+}
+
+/** Write a CRS selection back into the controls. */
+function applyCrsSelection(sel: CrsSelection | undefined): void {
+  const zone = document.getElementById("crsZone") as HTMLSelectElement | null;
+  const basis = document.getElementById("crsBasis") as HTMLSelectElement | null;
+  const csf = document.getElementById("crsCsf") as HTMLInputElement | null;
+  if (!zone || !basis) return;
+  zone.value = sel?.zone ?? "";
+  basis.value = sel?.basis ?? "grid";
+  if (csf) csf.value = sel?.combinedScaleFactor === undefined ? "" : String(sel.combinedScaleFactor);
+  syncCsfRow();
+}
+
+/** The scale factor only means anything for ground coordinates. */
+function syncCsfRow(): void {
+  const basis = document.getElementById("crsBasis") as HTMLSelectElement | null;
+  const row = document.getElementById("csfRow");
+  if (row) row.style.display = basis?.value === "ground" ? "" : "none";
 }
 
 function fmtSta(v: number): string {
@@ -517,7 +597,8 @@ function refresh(): void {
     // Keep the 3D view (if open/openable) in sync; its failures stay its own.
     lastDesign = design;
     renderSupSummary(design);
-    autosave(readForm());
+    renderMissingContext();
+    persist();
     try {
       viewer?.update(design);
     } catch (e) {
@@ -620,28 +701,28 @@ $("addDrop").addEventListener("click", () => {
   drops.push({ template: templates[0]?.name ?? "", toStation: "" });
   renderDrops(); refresh();
 });
+// Injected at build time by studio/vite.config.ts so the served page can say
+// which build it is. Declared, not imported: they are compile-time constants,
+// and they fall back to "unknown" when the bundle was built without them.
+declare const __BUILD_COMMIT__: string;
+declare const __BUILD_AT__: string;
+function buildInfo(): { commit: string; builtAt: string } {
+  return {
+    commit: typeof __BUILD_COMMIT__ === "string" ? __BUILD_COMMIT__ : "unknown",
+    builtAt: typeof __BUILD_AT__ === "string" ? __BUILD_AT__ : "unknown",
+  };
+}
+
 function readCrs() {
-  const zone = $<HTMLSelectElement>("crsZone").value;
-  if (!zone) return undefined;
-  const basis = $<HTMLSelectElement>("crsBasis").value as "grid" | "ground";
-  return zone === "GA-East"
-    ? {
-        zone,
-        epsgCode: 2239,
-        horizontalDatum: "NAD83 / Georgia Coordinate System of 1985, East Zone",
-        verticalDatum: "NAVD88",
-        coordinateBasis: basis,
-      }
-    : {
-        zone,
-        epsgCode: 2240,
-        horizontalDatum: "NAD83 / Georgia Coordinate System of 1985, West Zone",
-        verticalDatum: "NAVD88",
-        coordinateBasis: basis,
-      };
+  // Derived from the FORM, so every consumer -- both exports, the saved
+  // document, the tool surface -- reads one source. It used to be assembled
+  // here from the DOM and handed only to the LandXML exporter, which is how the
+  // staking CSV came to disagree with it.
+  return projectCrsFor(readCrsSelection());
 }
 
 $("download").addEventListener("click", () => {
+  if (blockedByUnconfirmed("the LandXML deliverable")) return;
   try {
     const design = formToDesign(readForm());
     const xml = toLandXML({ name: design.name, alignment: design.alignment, profile: design.profile, crs: readCrs() });
@@ -658,6 +739,7 @@ $("download").addEventListener("click", () => {
 // Parity: the agent has export_staking_csv, so the engineer has this. A
 // deliverable reachable only through an agent would make the agent a gatekeeper.
 $("downloadStaking").addEventListener("click", () => {
+  if (blockedByUnconfirmed("construction staking")) return;
   try {
     const design = formToDesign(readForm());
     const raw = $<HTMLInputElement>("stakeInterval").value.trim();
@@ -720,7 +802,7 @@ $("loadExample").addEventListener("click", () => {
 /** Apply a whole form to the live studio: inputs, state, and a re-render. */
 function writeForm(next: StudioForm, agentChange?: string): void {
   // Snapshot before anything changes: this is what undo_last_change restores.
-  const before = agentChange !== undefined ? snapshotForm() : undefined;
+  const before = agentChange !== undefined ? snapshotProject() : undefined;
   $<HTMLInputElement>("name").value = next.name;
   $<HTMLInputElement>("beginStation").value = String(next.beginStation);
   $<HTMLInputElement>("startE").value = String(next.startE);
@@ -732,6 +814,7 @@ function writeForm(next: StudioForm, agentChange?: string): void {
   drops = next.drops;
   superelevation = next.superelevation;
   roadside = next.roadside ?? [];
+  applyCrsSelection(next.crs);
   syncSupControls();
   renderElements();
   renderPvis();
@@ -740,12 +823,120 @@ function writeForm(next: StudioForm, agentChange?: string): void {
   refresh();
   if (agentChange !== undefined) {
     agentLedger.record(agentChange, before);
+    // ⛔ Persist AGAIN, now that the entry exists.
+    //
+    // refresh() autosaves, and it ran before this record, so the saved document
+    // carried the new design with the OLD pending list -- one change behind,
+    // every time. A reload then restored the change without its confirmation
+    // requirement and the deliverable unlocked itself. Saving state that
+    // contradicts the ledger is the same laundering as the share link, by a
+    // route nobody has to choose.
+    persist();
   }
   renderPendingBanner();
 }
 
 /** The confirmation boundary, made visible. An agent may author the whole road;
  *  only a person standing behind a seal can confirm it. */
+/** Save the design AND what is still unconfirmed, so a reload restores both. */
+function persist(): void {
+  autosave(readForm(), undefined, pendingDescriptions(), contextSummary());
+}
+
+/**
+ * What imported context is loaded, as names and counts only.
+ *
+ * The context itself is NOT saved -- a TIN is far too large for localStorage or
+ * a URL. This exists so its absence after a reload can be stated rather than
+ * discovered: a design whose cut and fill were fitted to a surveyed surface
+ * should not reopen with no surface and nothing said about it.
+ */
+function contextSummary(): DesignDocument["context"] | undefined {
+  const out = {
+    // What we know was there but is not loaded now, carried forward...
+    ...(knownMissingContext ?? {}),
+    // ...and overridden, layer by layer, by whatever IS loaded.
+    ...(terrain ? { terrainName: terrain.name, terrainTriangles: terrain.faces.length } : {}),
+    ...(planFeatures && planFeatures.features.length > 0
+      ? { siteFeatureCount: planFeatures.features.length } : {}),
+    ...(designSections.length > 0 ? { designSectionCount: designSections.length } : {}),
+  };
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Which of those layers is missing RIGHT NOW, in words.
+ *
+ * Recomputed rather than remembered, so the warning disappears by itself the
+ * moment the context is re-imported, and comes back if it is removed again.
+ */
+function missingContextNow(): string[] {
+  const c = contextSummary();
+  const out: string[] = [];
+  if (c?.terrainName && !terrain) {
+    out.push(`ground surface "${c.terrainName}"` +
+      (c.terrainTriangles ? ` (${c.terrainTriangles.toLocaleString()} triangles)` : ""));
+  }
+  if (c?.siteFeatureCount && !(planFeatures && planFeatures.features.length > 0)) {
+    out.push(`${c.siteFeatureCount} site features`);
+  }
+  if (c?.designSectionCount && designSections.length === 0) {
+    out.push(`${c.designSectionCount} reference section surface(s)`);
+  }
+  return out;
+}
+
+/** Show or clear the "this was worked against ground you no longer have" bar. */
+function renderMissingContext(): void {
+  const existing = document.getElementById("contextMissing");
+  const missing = missingContextNow();
+  if (missing.length === 0) { existing?.remove(); return; }
+  const bar = existing ?? document.createElement("div");
+  bar.id = "contextMissing";
+  bar.className = "context-missing";
+  bar.textContent =
+    `This design was worked against ${missing.join(", ")}, which is not saved with it. ` +
+    "Cut and fill cannot be recomputed until you re-import it.";
+  if (!existing) $("status").after(bar);
+}
+
+/**
+ * What is still awaiting a licensed engineer, in the words the tools used.
+ *
+ * ⛔ CANONICAL text: no origin label. This is what the portable document
+ * carries, and a document that carried the label would have it appended again
+ * on the next open, and again on the one after that.
+ */
+function pendingDescriptions(): string[] {
+  return agentLedger.pending().map((c) => c.description);
+}
+
+/** The origin label, rendered once, from the flag rather than from the text. */
+const INHERITED_LABEL = " (inherited unconfirmed — you have not reviewed it)";
+function describeForDisplay(c: { description: string; inherited?: boolean }): string {
+  return c.inherited === true ? c.description + INHERITED_LABEL : c.description;
+}
+
+/**
+ * The gate the banner has always claimed and the human path never enforced.
+ *
+ * export_landxml and export_staking_csv refuse while anything is unconfirmed,
+ * but the Studio's own download buttons did not: the banner said "LandXML export
+ * is blocked until a licensed engineer confirms these" while the button beside
+ * it produced the file anyway. Confirming is one click; the engineer should make
+ * it deliberately rather than find out the rule was advisory.
+ */
+function blockedByUnconfirmed(what: string): boolean {
+  const n = agentLedger.pendingCount();
+  if (n === 0) return false;
+  $("status").innerHTML =
+    `<span class="err">${n} agent-proposed change${n === 1 ? "" : "s"} awaiting your ` +
+    `confirmation - ${what} is blocked until you confirm them</span>`;
+  renderPendingBanner();
+  document.getElementById("agentPending")?.scrollIntoView({ block: "nearest" });
+  return true;
+}
+
 function renderPendingBanner(): void {
   let bar = document.getElementById("agentPending");
   const pending = agentLedger.pending();
@@ -774,7 +965,7 @@ function renderPendingBanner(): void {
   list.className = "pending-list";
   for (const c of pending) {
     const li = document.createElement("li");
-    li.textContent = c.description;
+    li.textContent = describeForDisplay(c);
     list.append(li);
   }
 
@@ -795,28 +986,75 @@ function renderPendingBanner(): void {
 
 /** Zones this project offers, read from the control rather than duplicated. */
 function crsZones(): { value: string; label: string }[] {
-  const sel = document.getElementById("crsZone") as HTMLSelectElement | null;
-  if (!sel) return [];
-  return [...sel.options]
-    .filter((o) => o.value !== "")
-    .map((o) => ({ value: o.value, label: o.textContent ?? o.value }));
+  return CRS_ZONES.map((z) => ({ value: z.value, label: z.label }));
 }
 
-/** Set the CRS from a zone key. Returns false if the control rejects it. */
-function setCrs(zone: string, basis: "grid" | "ground"): boolean {
+/**
+ * Set the CRS from a zone key. Returns false if the control rejects it.
+ *
+ * Goes through writeForm so the change lands in the agent ledger and can be
+ * undone like any other. It used to poke the two <select> elements directly,
+ * which is why undo_last_change had no CRS entry to restore and reported on
+ * whatever unrelated change happened to be last.
+ */
+function setCrs(zone: string, basis: "grid" | "ground",
+                combinedScaleFactor?: number, agentChange?: string): boolean {
   const sel = document.getElementById("crsZone") as HTMLSelectElement | null;
-  const bas = document.getElementById("crsBasis") as HTMLSelectElement | null;
-  if (!sel || !bas) return false;
-  if (![...sel.options].some((o) => o.value === zone)) return false;
-  sel.value = zone;
-  bas.value = basis;
-  refresh();
+  if (!sel) return false;
+  if (zone !== "" && !CRS_ZONES.some((z) => z.value === zone)) return false;
+  const next = readForm();
+  next.crs = { zone, basis, ...(combinedScaleFactor !== undefined ? { combinedScaleFactor } : {}) };
+  writeForm(next, agentChange);
   return true;
 }
 
-/** A deep copy of the current form, for the undo history. */
-function snapshotForm(): StudioForm {
-  return JSON.parse(JSON.stringify(readForm())) as StudioForm;
+/**
+ * Everything an undo has to put back.
+ *
+ * ⛔ This used to be the form alone, so undo restored the road and left the
+ * imported context where the change had put it: an import that replaced the
+ * terrain reported "undone: true" and the new surface stayed loaded. Restoring
+ * part of a change and calling it restored is worse than refusing to undo.
+ *
+ * Terrain and plan features are held by REFERENCE, not deep-copied. They are
+ * large immutable objects -- a 25,140-triangle TIN -- that are only ever
+ * replaced wholesale, never mutated in place, so keeping the old handle is both
+ * correct and the difference between an undo step costing bytes and megabytes.
+ */
+interface ProjectSnapshot {
+  form: StudioForm;
+  terrain: Tin | undefined;
+  planFeatures: PlanFeatureSet | undefined;
+  designSections: readonly DesignSectionSurface[];
+  /**
+   * ⛔ In the snapshot because loading a document CHANGES it. Undo restored the
+   * road and left the discarded document's ground named in the warning -- and
+   * replacing missing-context A with a load carrying B, then undoing, left B.
+   * Knowing what the design was fitted to is project state like any other.
+   */
+  knownMissingContext: DesignDocument["context"];
+}
+
+function snapshotProject(): ProjectSnapshot {
+  return {
+    form: JSON.parse(JSON.stringify(readForm())) as StudioForm,
+    terrain,
+    planFeatures,
+    designSections,
+    knownMissingContext,
+  };
+}
+
+function restoreProject(snap: ProjectSnapshot): void {
+  if (snap.terrain !== terrain) setTerrain(snap.terrain);
+  planFeatures = snap.planFeatures;
+  designSections = snap.designSections;
+  knownMissingContext = snap.knownMissingContext;
+  viewer?.setPlanFeatures(planFeatures);
+  viewer?.setDesignSections(designSections);
+  restoreForm(snap.form);
+  renderMissingContext();
+  persist();
 }
 
 /** Restore a form without recording it as a new agent change. */
@@ -832,6 +1070,7 @@ function restoreForm(f: StudioForm): void {
   drops = f.drops;
   superelevation = f.superelevation;
   roadside = f.roadside ?? [];
+  applyCrsSelection(f.crs);
   syncSupControls();
   renderElements();
   renderPvis();
@@ -948,8 +1187,58 @@ const registeredTools = registerWebMcp({
   readForm,
   writeForm,
   readCrs,
+  buildInfo,
+  setImportedContext: (ctx, agentChange) => {
+    const before = agentChange !== undefined ? snapshotProject() : undefined;
+    // Same ordering trap as writeForm: setTerrain/refresh autosave on the way
+    // through, so the entry has to be recorded before the last persist wins.
+    if (ctx.planFeatures !== undefined) {
+      planFeatures = ctx.planFeatures;
+      viewer?.setPlanFeatures(planFeatures);
+    }
+    if (ctx.designSections !== undefined) {
+      designSections = ctx.designSections;
+      viewer?.setDesignSections(designSections);
+    }
+    if (ctx.terrain !== undefined) setTerrain(ctx.terrain);
+    else refresh();
+    if (agentChange !== undefined) {
+      agentLedger.record(agentChange, before);
+      persist();
+      renderPendingBanner();
+    }
+  },
+  contextSummary,
+  setKnownMissingContext: (ctx) => {
+    knownMissingContext = ctx;
+    renderMissingContext();
+    // ⛔ Persist HERE. This runs after applyOrPreview and recordInherited have
+    // already saved, so without it the committed transaction was written to
+    // storage without the context that arrived with it: the warning showed
+    // until the next reload and then vanished. The assignment is part of the
+    // transaction, so it has to be part of the transaction's last save.
+    persist();
+  },
+  recordInherited: (ds) => {
+    // Owned by the load that just ran, so undoing that load discards them too.
+    const owner = agentLedger.lastTransaction()?.id;
+    for (const d of ds) {
+      // The description is stored VERBATIM. `inherited` is already a flag on
+      // the entry, so the origin is rendered from it once at display time --
+      // appending it here meant reload -> share-open -> reload produced
+      // "...(inherited unconfirmed from the opened design)" three times over,
+      // mutating the provenance text and lengthening every later share URL.
+      agentLedger.record(d, undefined, new Date(), true, owner);
+    }
+    persist();
+    renderPendingBanner();
+  },
+  // Canonical text plus the flag. The origin label is rendered by whoever
+  // displays it, so it never reaches the portable document.
   pendingChanges: () =>
-    agentLedger.pending().map((c) => ({ id: c.id, description: c.description })),
+    agentLedger.pending().map((c) => ({
+      id: c.id, description: c.description, inherited: c.inherited === true,
+    })),
   onToolCall: (tool, result) => {
     const { kind, summary } = classifyResult(result);
     agentLog.record(tool, kind, summary);
@@ -958,7 +1247,7 @@ const registeredTools = registerWebMcp({
   undoLastAgentChange: () => {
     const r = agentLedger.undoLast();
     if (!r.ok) return { ok: false as const, reason: r.reason };
-    restoreForm(r.before as StudioForm);
+    restoreProject(r.before as ProjectSnapshot);
     renderAgentLog();
     return { ok: true as const, description: r.change.description };
   },
@@ -975,7 +1264,8 @@ const registeredTools = registerWebMcp({
       return undefined; // an invalid design has no ground profile to report
     }
   },
-  shareLink: () => shareUrl(readForm(), window.location.href),
+  shareLink: () =>
+    shareUrl(readForm(), window.location.href, pendingDescriptions(), contextSummary()),
   setCrs,
   crsZones,
   offerAlternatives: (question, alts: readonly AlternativeInput[], designSpeedMph, emax) => {
@@ -993,10 +1283,20 @@ const registeredTools = registerWebMcp({
   if (!box) return;
   if (registeredTools.length > 0) {
     box.className = "agent-live";
+    // ⚠ "registered BY THIS PAGE", not "live". Registration returning says the
+    // page offered its tools; it does not say the browser accepted them. On a
+    // page opened from a long share link the connector refuses the whole
+    // configuration and this banner still read "Agent surface live", which is
+    // the app asserting something it cannot observe.
     box.textContent =
-      `Agent surface live — ${registeredTools.length} WebMCP tools registered. ` +
+      `${registeredTools.length} WebMCP tools registered by this page. ` +
       `Ask your agent to design, inspect or change this road; it proposes, the ` +
-      `kernel computes, and you confirm.`;
+      `kernel computes, and you confirm.` +
+      (window.location.hash.length > 800
+        ? " ⚠ This page was opened from a long design link. Some browsers refuse to enable " +
+          "WebMCP when the page URL is that long, so your agent may not see these tools even " +
+          "though the page offered them. The design itself is here and fully editable."
+        : "");
   } else {
     box.className = "agent-absent";
     box.textContent =
@@ -1015,13 +1315,42 @@ let lastDesign: RoadDesign | null = null;
 const setReadout = (t: string): void => {
   $("readout3d").textContent = t;
 };
+/**
+ * Status text that came from a file or a shared document.
+ *
+ * The class is ours; the message is theirs, so it goes in as a text node.
+ */
+function setStatus(kind: "ok" | "err", message: string): void {
+  const host = $("status");
+  host.textContent = "";
+  const span = document.createElement("span");
+  span.className = kind;
+  span.textContent = message;
+  host.append(span);
+}
+
+/**
+ * ⛔ Built as DOM nodes, never as markup.
+ *
+ * Legend entries carry names that came out of an IMPORTED FILE — surface names,
+ * point codes, template names. Interpolating those into innerHTML made a
+ * surface called `<em id="…">` into a real element on the page: a LandXML file
+ * could inject markup into whoever opened it. Nothing that arrived in a file
+ * gets to be markup, and the colour goes through style.color rather than into
+ * an attribute string.
+ */
 const setLegend = (entries: LegendEntry[]): void => {
-  $("legend3d").innerHTML = entries
-    .map(
-      (e) =>
-        `<span style="margin-right:10px;"><span style="color:${e.color};">■</span> ${e.name}</span>`,
-    )
-    .join("");
+  const host = $("legend3d");
+  host.textContent = "";
+  for (const e of entries) {
+    const wrap = document.createElement("span");
+    wrap.style.marginRight = "10px";
+    const swatch = document.createElement("span");
+    swatch.textContent = "■";
+    swatch.style.color = e.color;
+    wrap.append(swatch, document.createTextNode(` ${e.name}`));
+    host.append(wrap);
+  }
 };
 
 function activate3d(): void {
@@ -1059,6 +1388,28 @@ $("btnView3d").addEventListener("click", () => switchView(true));
 $("exag").addEventListener("change", () =>
   viewer?.setExaggeration(Number($<HTMLSelectElement>("exag").value)),
 );
+
+// The CRS controls had NO listeners: nothing depended on them until an export
+// read them. Now that the selection is part of the design, changing it has to
+// re-validate -- a ground basis with no scale factor is a design the schema
+// refuses, and the engineer should see that when they choose it, not at export.
+// Parity: the agent can read the ground extent and see it is off the road; the
+// engineer gets a way to actually LOOK at it without inventing an alignment
+// inside it. Imported terrain that does not overlap the road is drawn where it
+// really is, which can be miles from the corridor the camera is framing.
+$("fitGround").addEventListener("click", () => {
+  const at = viewer?.fitToGround();
+  $("readout3d").textContent = at === undefined
+    ? "no ground imported - use import_landxml or the Import button"
+    : at.offsetFt > 0
+      ? `ground "${at.name}" is ${at.offsetFt.toLocaleString()} ft from the road`
+      : `ground "${at.name}"`;
+});
+
+$("crsZone").addEventListener("change", () => refresh());
+$("crsBasis").addEventListener("change", () => { syncCsfRow(); refresh(); });
+$("crsCsf").addEventListener("input", () => refresh());
+syncCsfRow();
 
 /** The agent activity log. Newest first. */
 function renderAgentLog(): void {
@@ -1210,9 +1561,28 @@ for (const id of ["supEnabled", "supSpeed", "supEmax", "supNc", "supGrad"]) {
   if (!restored.ok) return;
   try {
     restoreForm(restored.form);
+    // \u26d4 Unconfirmed work stays unconfirmed when it changes hands.
+    //
+    // Confirmation is a licensed engineer's act on a specific design; it does
+    // not transfer to whoever opens the link. Without this a shared copy arrived
+    // with no pending banner and a live export button, so unreviewed agent work
+    // could be laundered into a deliverable by passing it through a URL.
+    for (const d of restored.unconfirmed) {
+      agentLedger.record(d, undefined, new Date(), true);
+    }
+    renderPendingBanner();
+    // ⛔ Context is not persisted, so remember what the design was worked
+    // against and say what is missing. Seeded before the first refresh, which
+    // is what persists it -- doing it after let an empty summary overwrite it.
+    knownMissingContext = restored.context;
+    renderMissingContext();
     const note = $("status");
     if (fromLink?.ok === true) {
-      note.innerHTML = '<span class="ok">\u2713 opened a shared design</span>';
+      note.innerHTML = restored.unconfirmed.length > 0
+        ? '<span class="ok">\u2713 opened a shared design</span> \u2014 it carries ' +
+          `${restored.unconfirmed.length} unconfirmed change` +
+          `${restored.unconfirmed.length === 1 ? "" : "s"} you have not reviewed`
+        : '<span class="ok">\u2713 opened a shared design</span>';
     }
   } catch {
     /* a bad restore must not take the app down; the seeded design stands */
@@ -1228,7 +1598,7 @@ $("importLandxml").addEventListener("change", (ev) => {
   void file.text().then((xml) => {
     const parsed = parseLandXML(xml);
     if (!parsed.ok) {
-      status.innerHTML = `<span class="err">${parsed.code}: ${parsed.detail}</span>`;
+      setStatus("err", `${parsed.code}: ${parsed.detail}`);
       input.value = "";
       return;
     }
@@ -1239,9 +1609,8 @@ $("importLandxml").addEventListener("change", (ev) => {
     viewer?.setPlanFeatures(planFeatures);
     const a = parsed.alignments[0];
     if (!a) {
-      status.innerHTML =
-        `<span class="ok">\u2713 loaded ground surface "${parsed.surfaces[0]?.name ?? ""}" ` +
-        `(${parsed.surfaces[0]?.faces.length ?? 0} triangles)</span>`;
+      setStatus("ok", `\u2713 loaded ground surface "${parsed.surfaces[0]?.name ?? ""}" ` +
+        `(${parsed.surfaces[0]?.faces.length ?? 0} triangles)`);
       input.value = "";
       return;
     }
@@ -1272,14 +1641,13 @@ $("importLandxml").addEventListener("change", (ev) => {
     });
     const extra = parsed.alignments.length > 1
       ? ` (${parsed.alignments.length} alignments in the file; took the first)` : "";
-    status.innerHTML =
-      `<span class="ok">\u2713 imported "${a.name}"${extra}</span>`;
+    setStatus("ok", `\u2713 imported "${a.name}"${extra}`);
     input.value = "";
   });
 });
 
 $("shareLink").addEventListener("click", () => {
-  const url = shareUrl(readForm(), window.location.href);
+  const url = shareUrl(readForm(), window.location.href, pendingDescriptions(), contextSummary());
   const status = $("status");
   void navigator.clipboard?.writeText(url)
     .then(() => {

@@ -85,12 +85,37 @@ export interface TemplateSegment {
   slopePercent: number;
 }
 
+/**
+ * One authored course of the pavement structure.
+ *
+ * ⛔ AUTHORED, never designed. The engineer states what the structure IS; the
+ * app does not compute what it should be. There is no default stack, no default
+ * thickness, and the material is free text the engineer typed -- nothing here
+ * infers a material from a layer's name, exactly as segment materials do not.
+ */
+export interface PavementLayer {
+  /** The engineer's own name for the course, e.g. "surface", "base". */
+  name: string;
+  /** Authored thickness in INCHES. Positive and finite; never defaulted. */
+  thicknessIn: number;
+  /** Optional free text the engineer typed. Not a controlled vocabulary. */
+  material?: string;
+}
+
 export interface Template {
   name: string;
   /** Segments outward from centerline on the left side */
   left: TemplateSegment[];
   /** Segments outward from centerline on the right side */
   right: TemplateSegment[];
+  /**
+   * The pavement structure under this template, top course first.
+   *
+   * Order is the structure: duplicate names are allowed because position, not
+   * a guessed identity, says which course is which. Absent means the engineer
+   * has not stated one -- NOT that there is no pavement.
+   */
+  pavementLayers?: PavementLayer[];
 }
 
 export interface TemplateDrop {

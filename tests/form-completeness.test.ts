@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { formToDesign } from "../src/studio/form-to-design";
 import type {
-  FormDropRow, FormElementRow, FormPviRow, FormSegmentRow, StudioForm,
+  FormDropRow, FormElementRow, FormPavementLayerRow, FormPviRow, FormSegmentRow,
+  FormTemplateRow, StudioForm,
 } from "../src/studio/form-to-design";
+import type { CrsSelection } from "../src/studio/crs";
 
 // ---------------------------------------------------------------------------
 // THIS FILE EXISTS TO TURN A SILENT BUG INTO A BUILD FAILURE.
@@ -48,6 +50,21 @@ const _dropProbe: Required<FormDropRow> = {
 const _segmentProbe: Required<FormSegmentRow> = {
   name: "lane", width: "12", slopePercent: "-2", material: "asphalt",
 };
+const _crsProbe: Required<CrsSelection> = {
+  zone: "GA-West", basis: "ground", combinedScaleFactor: 0.9999,
+};
+// ⚠ The TEMPLATE row itself had no probe, which is how pavementLayers was added
+// to it and reached the mapping with the build still green. Every row type the
+// form holds needs one, including the ones that hold other rows.
+const _templateProbe: Required<FormTemplateRow> = {
+  name: "2-lane",
+  left: [{ name: "lane", width: "12", slopePercent: "-2", material: "asphalt" }],
+  right: [{ name: "lane", width: "12", slopePercent: "-2", material: "asphalt" }],
+  pavementLayers: [{ name: "surface", thicknessIn: "4", material: "asphalt" }],
+};
+const _pavementProbe: Required<FormPavementLayerRow> = {
+  name: "surface", thicknessIn: "4", material: "asphalt concrete",
+};
 
 const completeSegment: Required<FormSegmentRow> = {
   name: "lane",
@@ -77,6 +94,11 @@ const completeForm: Required<StudioForm> = {
     name: "2-lane",
     left: [completeSegment, { name: "shoulder", width: "6", slopePercent: "-4", material: "gravel" }],
     right: [completeSegment, { name: "shoulder", width: "6", slopePercent: "-4", material: "gravel" }],
+    pavementLayers: [
+      { name: "surface", thicknessIn: "4", material: "asphalt concrete" },
+      { name: "base", thicknessIn: "8" },
+      { name: "subbase", thicknessIn: "12", material: "graded aggregate" },
+    ],
   }],
   drops: [{ template: "2-lane", toStation: "", transition: "" }],
   superelevation: { designSpeedMph: 55, emax: 0.06, normalCrownPercent: 2 },
@@ -85,6 +107,7 @@ const completeForm: Required<StudioForm> = {
     beginStation: 1200, endStation: 1800, offsetFt: 20,
     heightFt: 2.5, note: "std detail 4A",
   }],
+  crs: { zone: "GA-East", basis: "ground", combinedScaleFactor: 0.99988 },
 };
 
 describe("every authored field survives the mapping to a design", () => {
@@ -114,6 +137,30 @@ describe("every authored field survives the mapping to a design", () => {
     expect(t.left[0]!.material).toBe("asphalt");
     expect(t.left[1]!.material).toBe("gravel");
     expect(t.right[0]!.material).toBe("asphalt");
+  });
+
+  it("carries the COORDINATE SYSTEM -- the field that lived outside the form", () => {
+    // It used to be read straight off two <select> elements, so it never reached
+    // the design at all: the LandXML exporter was handed it separately and the
+    // staking CSV was not handed it, which is how the two disagreed.
+    expect(design.crs).toBeDefined();
+    expect(design.crs!.zone).toBe("GA-East");
+    expect(design.crs!.epsgCode).toBe(2239);
+    expect(design.crs!.coordinateBasis).toBe("ground");
+    // Ground coordinates are meaningless without it, and zod refuses them.
+    expect(design.crs!.combinedScaleFactor).toBe(0.99988);
+    expect(design.crs!.verticalDatum).toBe("NAVD88");
+  });
+
+  it("carries the AUTHORED PAVEMENT LAYERS in the order they were stated", () => {
+    const t = design.templates["2-lane"]!;
+    expect(t.pavementLayers).toHaveLength(3);
+    expect(t.pavementLayers!.map((L) => L.name)).toEqual(["surface", "base", "subbase"]);
+    expect(t.pavementLayers!.map((L) => L.thicknessIn)).toEqual([4, 8, 12]);
+    // Order is the structure. A layer with no material stays without one --
+    // nothing infers "base" means aggregate.
+    expect(t.pavementLayers![0]!.material).toBe("asphalt concrete");
+    expect(t.pavementLayers![1]!.material).toBeUndefined();
   });
 
   it("carries the superelevation policy", () => {

@@ -102,9 +102,18 @@ try {
   console.log("  zones offered:", (zones.available || []).map((z) => z.value).join(", "));
   const bad = JSON.parse(await b2.ev(CALL("set_coordinate_system", { zone: "GA-Middle", commit: true })));
   console.log("  an invented zone:", bad.code, "->", (bad.available || []).join(", "));
-  const good = JSON.parse(await b2.ev(CALL("set_coordinate_system", { zone: "GA-East", basis: "ground", commit: true })));
-  console.log("  GA-East/ground:", good.committed ? "committed" : "REFUSED");
+  // ⛔ Ground coordinates need a combined scale factor. This harness used to
+  // call GA-East/ground without one and print "committed": the CRS never
+  // reached the design, so the schema rule that forbids it was never applied.
+  const noCsf = JSON.parse(await b2.ev(CALL("set_coordinate_system",
+    { zone: "GA-East", basis: "ground", commit: true })));
+  console.log("  GA-East/ground with no scale factor:", noCsf.code ?? "committed (WRONG)");
+  const good = JSON.parse(await b2.ev(CALL("set_coordinate_system",
+    { zone: "GA-East", basis: "ground", combinedScaleFactor: 0.99988, commit: true })));
+  console.log("  GA-East/ground with CSF 0.99988:", good.committed ? "committed" : `REFUSED ${good.code}`);
   const now = JSON.parse(await b2.ev(CALL("read_coordinate_systems", {})));
   console.log("  selected now:", JSON.stringify(now.selected));
+  const undone = JSON.parse(await b2.ev(CALL("undo_last_change", {})));
+  console.log("  and it can be undone:", undone.undone === true);
 } catch (e) { console.log("ERROR: " + e.message); process.exitCode = 1; }
 finally { a?.close(); b2?.close(); server.close(); await sleep(300); }

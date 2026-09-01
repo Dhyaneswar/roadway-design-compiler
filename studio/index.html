@@ -64,6 +64,9 @@
     #readout3d { font: 12.5px var(--mono); color: var(--text); margin-left: auto; text-align: right; min-height: 1em; }
     #viewer3d { flex: 1; min-height: 0; }
   
+    .context-missing { margin-top: 8px; padding: 8px 11px; border-radius: 6px;
+      border: 1px solid #6b5a2f; background: #262114; color: #e0bd6a; font-size: 12.5px; }
+
     /* agent surface status */
     #agentStatus { font-size: 12.5px; line-height: 1.5; padding: 9px 11px;
       border-radius: 6px; border: 1px solid var(--line); margin-bottom: 10px; }
@@ -201,6 +204,14 @@
           </select>
         </div>
       </div>
+      <div class="grid2" id="csfRow" style="margin-top:8px; display:none;">
+        <div>
+          <label>Combined scale factor (required for ground)</label>
+          <input id="crsCsf" placeholder="e.g. 0.99988" />
+          <div class="hint">Ground distances are grid distances divided by this.
+            Ground coordinates without it cannot be reconciled with a grid.</div>
+        </div>
+      </div>
       <h2>Start point &amp; heading</h2>
       <div class="grid4">
         <div><label>Easting (ft)</label><input id="startE" value="2200000" /></div>
@@ -267,6 +278,7 @@
           <option value="10">10×</option>
         </select>
       </span>
+      <span><button id="fitGround" type="button">Fit to ground</button></span>
       <span id="legend3d"></span>
       <span id="readout3d"></span>
     </div>

@@ -12,6 +12,7 @@
 // elevation -- and are converted to this project's { n, e, z } immediately, so the
 // order never has to be remembered again.
 
+import type { SurfaceAppearance } from "../viewer/surface-appearance";
 export interface TinPoint {
   n: number;
   e: number;
@@ -27,6 +28,15 @@ export interface Tin {
   faces: TinFace[];
   /** Bounding box, computed once -- every sample needs it. */
   bounds: { minN: number; maxN: number; minE: number; maxE: number; minZ: number; maxZ: number };
+  /**
+   * How this surface should be drawn, and why -- resolved at import from the
+   * file's own MaterialTable, or a stable identity colour when it has none.
+   *
+   * Optional because a Tin can be built without a file behind it (tests, and
+   * any future generated surface), and because appearance is presentation: the
+   * kernel samples elevations and never reads this.
+   */
+  appearance?: SurfaceAppearance;
 }
 
 export function tinBounds(points: readonly TinPoint[]): Tin["bounds"] {

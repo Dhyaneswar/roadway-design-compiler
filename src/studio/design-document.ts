@@ -16,26 +16,71 @@
 
 import type { StudioForm } from "./form-to-design";
 
-/** Bumped when the shape changes in a way older links would not survive. */
-export const DOCUMENT_VERSION = 1;
+/**
+ * Bumped when the shape changes in a way older links would not survive.
+ *
+ * 2: carries `unconfirmed`. A v1 build opening a v2 link would drop the
+ * provenance silently, which is exactly the failure this field exists to
+ * prevent -- so the version gate refuses it instead.
+ */
+export const DOCUMENT_VERSION = 2;
 
 export interface DesignDocument {
   version: number;
   /** ISO timestamp, so a recipient knows how old the design is. */
   savedAt: string;
   form: StudioForm;
+  /**
+   * Agent-authored changes that were NOT yet confirmed when this was saved.
+   *
+   * ⛔ Without this a design LAUNDERS through a link. Independent QA found a
+   * source page with three pending changes whose shared copy showed no banner
+   * and an enabled export button: the unconfirmed work arrived looking
+   * reviewed. Confirmation is a licensed engineer's act on a specific design,
+   * and it does not survive being copied to somebody else -- so what travels is
+   * the fact that the work is still unconfirmed.
+   */
+  unconfirmed?: string[];
+  /**
+   * What imported context this design was worked against -- NOT the context.
+   *
+   * ⛔ Deliberate: the data is not saved. A single TIN here is 25,140 triangles;
+   * localStorage is about 5 MB and a real survey would blow it, and a URL that
+   * carried a surface would be megabytes long. So context is not persisted.
+   *
+   * But losing it SILENTLY is the problem. A design whose cut and fill were
+   * computed against a surveyed surface reopens with no surface at all, and
+   * nothing says the ground it was fitted to is missing. The names and counts
+   * cost a few dozen bytes and let the app say exactly what to re-import.
+   */
+  context?: {
+    terrainName?: string;
+    terrainTriangles?: number;
+    siteFeatureCount?: number;
+    designSectionCount?: number;
+  };
 }
 
-export function toDocument(form: StudioForm, now: Date = new Date()): DesignDocument {
+export function toDocument(
+  form: StudioForm,
+  now: Date = new Date(),
+  unconfirmed: readonly string[] = [],
+  context?: DesignDocument["context"],
+): DesignDocument {
+  const hasContext = context !== undefined
+    && Object.values(context).some((v) => v !== undefined && v !== 0);
   return {
     version: DOCUMENT_VERSION,
     savedAt: now.toISOString(),
     form: JSON.parse(JSON.stringify(form)) as StudioForm,
+    ...(unconfirmed.length > 0 ? { unconfirmed: [...unconfirmed] } : {}),
+    ...(hasContext ? { context } : {}),
   };
 }
 
 export type LoadResult =
-  | { ok: true; form: StudioForm; savedAt?: string }
+  | { ok: true; form: StudioForm; savedAt?: string; unconfirmed: string[];
+      context?: DesignDocument["context"] }
   | { ok: false; reason: string };
 
 /**
@@ -70,7 +115,12 @@ export function fromDocument(input: unknown): LoadResult {
     }
   }
   const savedAt = typeof raw.savedAt === "string" ? raw.savedAt : undefined;
-  return { ok: true, form: doc as unknown as StudioForm, savedAt };
+  const unconfirmed = Array.isArray(raw.unconfirmed)
+    ? raw.unconfirmed.filter((x): x is string => typeof x === "string")
+    : [];
+  const context = typeof raw.context === "object" && raw.context !== null
+    ? raw.context as DesignDocument["context"] : undefined;
+  return { ok: true, form: doc as unknown as StudioForm, savedAt, unconfirmed, context };
 }
 
 // --- URL fragment packing -------------------------------------------------
@@ -81,8 +131,13 @@ export function fromDocument(input: unknown): LoadResult {
 
 const FRAGMENT_KEY = "design=";
 
-export function encodeFragment(form: StudioForm, now?: Date): string {
-  const json = JSON.stringify(toDocument(form, now));
+export function encodeFragment(
+  form: StudioForm,
+  now?: Date,
+  unconfirmed: readonly string[] = [],
+  context?: DesignDocument["context"],
+): string {
+  const json = JSON.stringify(toDocument(form, now, unconfirmed, context));
   const bytes = new TextEncoder().encode(json);
   let binary = "";
   for (const b of bytes) binary += String.fromCharCode(b);
@@ -104,10 +159,18 @@ export function decodeFragment(fragment: string): LoadResult {
   }
 }
 
-/** A link that reproduces this design exactly. */
-export function shareUrl(form: StudioForm, base: string): string {
+/**
+ * A link that reproduces this design exactly -- including what is unconfirmed.
+ * "Exactly" has to include the provenance, or the link becomes a way to strip it.
+ */
+export function shareUrl(
+  form: StudioForm,
+  base: string,
+  unconfirmed: readonly string[] = [],
+  context?: DesignDocument["context"],
+): string {
   const clean = base.split("#")[0];
-  return `${clean}#${encodeFragment(form)}`;
+  return `${clean}#${encodeFragment(form, undefined, unconfirmed, context)}`;
 }
 
 // --- autosave -------------------------------------------------------------
@@ -115,9 +178,15 @@ export function shareUrl(form: StudioForm, base: string): string {
 const STORAGE_KEY = "rdc:design";
 
 /** Persist across a reload. Never throws: blocked storage must not break the app. */
-export function autosave(form: StudioForm, storage?: Storage): void {
+export function autosave(
+  form: StudioForm,
+  storage?: Storage,
+  unconfirmed: readonly string[] = [],
+  context?: DesignDocument["context"],
+): void {
   try {
-    (storage ?? window.localStorage).setItem(STORAGE_KEY, JSON.stringify(toDocument(form)));
+    (storage ?? window.localStorage).setItem(
+      STORAGE_KEY, JSON.stringify(toDocument(form, undefined, unconfirmed, context)));
   } catch {
     /* private mode, quota, blocked cookies -- losing autosave is not worth an error */
   }
