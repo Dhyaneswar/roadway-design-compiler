@@ -8,7 +8,8 @@
     "typecheck": "tsc --noEmit",
     "s1": "tsx scripts/make-s1-sample.ts",
     "studio": "vite studio --port 5173",
-    "studio:build": "vite build studio"
+    "studio:build": "vite build studio",
+    "check:bundle": "node scripts/check-bundle-size.mjs studio/dist"
   },
   "keywords": [],
   "author": "",

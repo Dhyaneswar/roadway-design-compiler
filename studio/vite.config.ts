@@ -54,8 +54,13 @@ export default defineConfig({
      *
      * ⚠ The remaining chunk over the default is three.js itself, and it is
      * DEFERRED. The threshold is lifted to stop a warning that no longer
-     * describes a problem -- not to silence one. If the entry chunk ever grows
-     * past this, that is a real regression and should fail loudly.
+     * describes a problem -- not to silence one.
+     *
+     * ⛔ This setting only prints; it fails neither Vite nor CI. An earlier
+     * version of this comment said an oversize entry "should fail loudly",
+     * which was an aspiration written as a fact. The actual guard is
+     * `scripts/check-bundle-size.mjs`, which asserts the ENTRY chunk against a
+     * budget and exits non-zero -- run by `npm run check:bundle` and by CI.
      */
     chunkSizeWarningLimit: 600,
   },

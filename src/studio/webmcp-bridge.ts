@@ -2142,8 +2142,13 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
 
   add(
     "remove_horizontal_element",
+    // ⛔ "there is no undo tool" was FALSE. undo_last_change reverses this
+    // removal completely while it is still an unconfirmed agent change, and QA
+    // proved it. A contract that denies a recovery path the app really has makes
+    // an agent avoid a reversible action -- or warn a person it cannot be undone.
     "Remove one horizontal element by its 1-based index. ⛔ DESTRUCTIVE: the element and its " +
-      "authored values are gone, and there is no undo tool. Preview first. This also shortens " +
+      "authored values are gone. This removal can be reversed with `undo_last_change` while it " +
+      "remains an unconfirmed agent change. Preview first. This also shortens " +
       "the alignment, so the profile's last PVI moves to the new end station.",
     S.obj({ index: S.int("1-based index of the element to remove."), commit: S.commit }, ["index"]),
     (args) => {
@@ -2254,8 +2259,10 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
 
   add(
     "remove_pvi",
+    // ⛔ Same correction as remove_horizontal_element: undo_last_change works.
     "Remove a PVI by its 1-based index. ⛔ DESTRUCTIVE: its station, elevation and vertical " +
-      "curve are gone, and there is no undo tool. Preview first. The first and last PVI define " +
+      "curve are gone. This removal can be reversed with `undo_last_change` while it remains an " +
+      "unconfirmed agent change. Preview first. The first and last PVI define " +
       "the profile's span, so removing one normally leaves the profile no longer matching the " +
       "alignment.",
     S.obj({ index: S.int("1-based index of the PVI to remove."), commit: S.commit }, ["index"]),
