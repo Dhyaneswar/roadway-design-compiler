@@ -41,8 +41,8 @@ date. At that point the project had no agent surface of any kind.
 
 **The evidence is the commit history.** The first published commit (30 August) bundles
 the pre-existing modules together with the first WebMCP layer; every commit after it is
-in-window work, visible one at a time. 56 of the repository's 119 files were added after
-that first commit, among them 21 test files and 19 driver scripts, 14 of which are
+in-window work, visible one at a time. 59 of the repository's 122 files were added after
+that first commit, among them 23 test files and 20 driver scripts, 14 of which are
 end-to-end verification harnesses that drive the built app over CDP exactly as an agent
 would.
 
