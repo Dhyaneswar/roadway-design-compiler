@@ -283,3 +283,39 @@ export function codeCategories(
   }
   return out;
 }
+
+/**
+ * What a surface's point codes amount to, in words a reader can act on.
+ *
+ * ⚠ Counts, not just names. The legend read "no codes · 12 uncoded", which
+ * states what is ABSENT twice and what is present never; "12 points, all
+ * uncoded" says the same fact as a fact. Where codes do exist, a bare list
+ * cannot distinguish a code marking four points from one marking four thousand,
+ * so each carries its count and the busiest come first.
+ *
+ * ⛔ Lives here, not in the viewer, so it is testable without a WebGL context --
+ * and so there is ONE builder. The viewer used to compose its own near-copy of
+ * this string, and the two could drift.
+ */
+const MAX_CODES_SHOWN = 4;
+
+export interface CodedSurfaceCounts {
+  codes: string[];
+  codeCounts: Record<string, number>;
+  codedPointCount: number;
+  uncodedPointCount: number;
+}
+
+export function describeCodes(surf: CodedSurfaceCounts): string {
+  const total = surf.codedPointCount + surf.uncodedPointCount;
+  if (total === 0) return "no points";
+  if (surf.codes.length === 0) return `${total} points, all uncoded`;
+
+  // Busiest first, ties broken by name so the order is stable between renders.
+  const ranked = Object.entries(surf.codeCounts)
+    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+  const shown = ranked.slice(0, MAX_CODES_SHOWN).map(([c, n]) => `${c} (${n})`);
+  const hidden = ranked.length - shown.length;
+  const codes = `Codes: ${shown.join(", ")}${hidden > 0 ? `, +${hidden} more` : ""}`;
+  return surf.uncodedPointCount > 0 ? `${codes} · ${surf.uncodedPointCount} uncoded` : codes;
+}

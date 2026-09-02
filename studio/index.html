@@ -93,7 +93,17 @@
     .views { margin-left: auto; display: flex; gap: 6px; }
     .view-btn.active { border-color: var(--accent); color: var(--accent); }
     #view3d { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
-    .v3d-bar { display: flex; gap: 18px; align-items: center; padding: 8px 22px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--dim); }
+    /* ⚠ flex-wrap and min-width:0 together. The bar holds a legend whose length
+       depends on an imported file -- seven surfaces with code counts is far more
+       text than one line -- and without both, a flex item refuses to shrink
+       below its content and pushes the readout off the viewport. */
+    .v3d-bar { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; padding: 8px 22px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--dim); }
+    #legend3d { min-width: 0; flex: 1 1 100%; }
+    #legend3d summary { cursor: pointer; color: var(--text); font-size: 11.5px; letter-spacing: .02em; text-transform: uppercase; opacity: .75; }
+    #legend3d summary:hover { opacity: 1; }
+    /* Wraps at any width, and each entry stays whole rather than breaking mid-name. */
+    .legend-items { display: flex; flex-wrap: wrap; gap: 3px 14px; margin-top: 5px; max-width: 100%; }
+    .legend-items > span { white-space: nowrap; }
     .v3d-bar select { width: auto; padding: 2px 6px; font-size: 12px; }
     #readout3d { font: 12.5px var(--mono); color: var(--text); margin-left: auto; text-align: right; min-height: 1em; }
     #viewer3d { flex: 1; min-height: 0; }
@@ -319,7 +329,7 @@
         </select>
       </span>
       <span><button id="fitGround" type="button">Fit to ground</button></span>
-      <span id="legend3d"></span>
+      <div id="legend3d"></div>
       <span id="readout3d"></span>
     </div>
     <div id="viewer3d"></div>

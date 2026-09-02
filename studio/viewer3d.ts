@@ -16,7 +16,7 @@ import { buildRoadsideGeometry } from "../src/viewer/roadside-mesh";
 import { buildDesignSectionMesh } from "../src/viewer/design-section-mesh";
 import { buildPavementMeshes, pavementLayerColors } from "../src/viewer/pavement-mesh";
 import type { DesignSectionSurface } from "../src/importers/design-sections";
-import { assignSurfaceColors,
+import { assignSurfaceColors, describeCodes,
   type SurfaceAppearance } from "../src/viewer/surface-appearance";
 import type { PlanFeatureSet } from "../src/importers/plan-features";
 
@@ -171,20 +171,28 @@ const siteFeatureMaterial = new THREE.LineBasicMaterial({ color: 0x6f8fa8 });
  * so it falls to surface identity plus whatever its point codes say. The label
  * is built here so the legend and the mesh cannot disagree about it.
  */
+/**
+ * What a surface's point codes amount to, in words a reader can act on.
+ *
+ * ⛔ ONE builder. The legend used to compose its own near-copy of this string,
+ * so the two could drift and only one of them was ever displayed -- `codeNote`
+ * was built on every surface and read by nothing.
+ *
+ * ⚠ Counts, not just names. "no codes · 12 uncoded" told a reader what was
+ * ABSENT twice and what was present never; "12 points, all uncoded" says the
+ * same fact as a fact. Where codes do exist, a bare list cannot distinguish a
+ * code marking four points from one marking four thousand, so each carries its
+ * count and the busiest come first.
+ */
 function surfaceLook(
   surf: DesignSectionSurface,
   colours: Map<string, number>,
-): SurfaceAppearance & { codeNote?: string } {
-  const colorHex = colours.get(surf.name) ?? 0x8b949e;
-  const coded = surf.codes.length;
+): SurfaceAppearance & { codeNote: string } {
   return {
-    colorHex,
+    colorHex: colours.get(surf.name) ?? 0x8b949e,
     label: surf.name,
     source: "surface-identity",
-    codeNote: coded > 0
-      ? `${coded} point code(s): ${surf.codes.join(", ")}` +
-        (surf.uncodedPointCount > 0 ? ` · ${surf.uncodedPointCount} uncoded points` : "")
-      : `no point codes · ${surf.uncodedPointCount} uncoded points`,
+    codeNote: describeCodes(surf),
   };
 }
 
@@ -529,14 +537,20 @@ let meshData: CorridorMesh | null = null;
         // The regions and texture names the file authored, said out loud even
         // when they cannot be painted. Holding a reference and never showing it
         // is indistinguishable from having dropped it.
+        // ⛔ "(identity)" is NOT repeated per entry any more. It was on almost
+        // every row, so it read as noise rather than as the caveat it is; the
+        // legend states it once, in its own header. What stays here is the part
+        // that differs between surfaces -- the regions and texture names the
+        // file authored, said out loud even when they cannot be painted, since
+        // holding a reference and never showing it looks like having dropped it.
         const detail = a?.source === "authored-material"
-          ? "authored material"
+          ? " — authored material"
           : a?.regionCount
-            ? `identity — ${a.regionCount} authored regions, ` +
+            ? ` — ${a.regionCount} authored regions, ` +
               `${a.authoredMaterials?.length ?? 0} materials not painted`
-            : "identity";
+            : "";
         legend.push({
-          name: `ground: ${terrainTin.name} (${detail})`,
+          name: `ground: ${terrainTin.name}${detail}`,
           color: `#${groundMaterialFor(terrainTin).color.getHexString()}`,
         });
       }
@@ -544,14 +558,10 @@ let meshData: CorridorMesh | null = null;
         if (surf.maxWidthFt >= 200) continue;
         const look = surfaceLook(surf, referenceColours);
         legend.push({
-          // Identity colour plus RAW code metadata. Deliberately not a
-          // per-code categorical view: the mesh is one colour per surface, so
-          // claiming code colours here would describe something not drawn.
-          name: `reference: ${look.label} (identity)` +
-            (surf.codes.length > 0
-              ? ` — codes ${surf.codes.join(", ")} · ${surf.codedPointCount} coded`
-              : " — no codes") +
-            (surf.uncodedPointCount > 0 ? ` · ${surf.uncodedPointCount} uncoded` : ""),
+          // ⚠ The counts describe the POINTS, not the colour. The mesh is one
+          // colour per surface, so a per-code colour key here would describe
+          // something that is not drawn.
+          name: `reference: ${look.label} — ${look.codeNote}`,
           color: `#${look.colorHex.toString(16).padStart(6, "0")}`,
         });
       }

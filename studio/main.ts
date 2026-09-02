@@ -1383,18 +1383,52 @@ function setStatus(kind: "ok" | "err", message: string): void {
  * gets to be markup, and the colour goes through style.color rather than into
  * an attribute string.
  */
+/**
+ * ⛔ Still built as DOM nodes, never as markup -- these names come out of an
+ * IMPORTED FILE. See the note on the legend XSS fix above.
+ *
+ * ⚠ COLLAPSED into a <details>, not laid out inline. Seven surfaces each
+ * carrying a name and its code counts is far more text than a one-line toolbar
+ * can hold, so the legend stretched across the viewport and pushed the readout
+ * off the end. Open by default -- it is the key to what is on screen, and a
+ * reader should not have to discover it -- but closable, and wrapping when open.
+ */
 const setLegend = (entries: LegendEntry[]): void => {
   const host = $("legend3d");
   host.textContent = "";
+  if (entries.length === 0) return;
+
+  const box = document.createElement("details");
+  box.open = true;
+
+  const head = document.createElement("summary");
+  head.textContent = `Legend (${entries.length})`;
+  /**
+   * The identity caveat, stated ONCE.
+   *
+   * "(identity)" used to be appended to almost every row, where repetition made
+   * it read as noise rather than as the warning it is: a colour the file did not
+   * choose. Said once, as a title, it stays available without crowding out the
+   * counts a reader actually came for.
+   */
+  head.title =
+    "Colours a file does not state are identity colours: chosen only to tell " +
+    "surfaces apart, never to characterise what they are made of. A surface " +
+    "whose file states a material is drawn in that material's colour and says so.";
+  box.append(head);
+
+  const items = document.createElement("div");
+  items.className = "legend-items";
   for (const e of entries) {
     const wrap = document.createElement("span");
-    wrap.style.marginRight = "10px";
     const swatch = document.createElement("span");
     swatch.textContent = "■";
     swatch.style.color = e.color;
     wrap.append(swatch, document.createTextNode(` ${e.name}`));
-    host.append(wrap);
+    items.append(wrap);
   }
+  box.append(items);
+  host.append(box);
 };
 
 /** Guards against a second click landing while the chunk is still in flight. */

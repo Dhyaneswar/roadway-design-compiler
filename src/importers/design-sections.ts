@@ -54,6 +54,15 @@ export interface DesignSectionSurface {
   maxElevationFt: number;
   /** Distinct point codes on this surface, sorted. Empty when none are coded. */
   codes: string[];
+  /**
+   * How many points carry each code, keyed by the code.
+   *
+   * The distinct list alone cannot say whether a code marks four points or four
+   * thousand, so a legend built from it could only ever name codes, never weigh
+   * them. Counted in the same pass that finds them -- a second walk over every
+   * point of a 3.3 MB document to answer the same question would be waste.
+   */
+  codeCounts: Record<string, number>;
   codedPointCount: number;
   uncodedPointCount: number;
 }
@@ -129,18 +138,20 @@ export function parseDesignSections(
     }
     // Codes are counted across the WHOLE surface, coded and uncoded alike: a
     // surface where most points carry no code has to be able to say so.
-    const codeSet = new Set<string>();
+    const codeTally = new Map<string, number>();
     let coded = 0, uncoded = 0;
     for (const run of runs) {
       for (const p of run.points) {
         if (p.code === undefined) uncoded += 1;
-        else { coded += 1; codeSet.add(p.code); }
+        else { coded += 1; codeTally.set(p.code, (codeTally.get(p.code) ?? 0) + 1); }
       }
     }
     out.push({
       name,
       runs,
-      codes: [...codeSet].sort(),
+      // Derived from the tally, so the list and the counts cannot disagree.
+      codes: [...codeTally.keys()].sort(),
+      codeCounts: Object.fromEntries([...codeTally.entries()].sort((a, b) => a[0] < b[0] ? -1 : 1)),
       codedPointCount: coded,
       uncodedPointCount: uncoded,
       stationCount: stations.size,
