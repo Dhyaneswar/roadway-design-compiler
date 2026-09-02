@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { beforeAll, describe, expect, it } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { detectUnit, FT_PER_M, parseMaterials, parseSurfaces } from "../src/importers/landxml";
 import { parseDesignSections } from "../src/importers/design-sections";
 import { assignSurfaceColors, codeCategories, UNCODED_LABEL,
@@ -29,12 +30,43 @@ import { assignSurfaceColors, codeCategories, UNCODED_LABEL,
  * for the wrong reason.
  */
 
+/**
+ * Where the samples live, if you have them.
+ *
+ * ⛔ NOT a hardcoded absolute path any more. It named one developer's drive, so
+ * on every other machine these tests skipped silently and the skip looked like
+ * a deliberate exclusion rather than a missing directory.
+ *
+ * Download the files from the links in the README's "Try a terrain import"
+ * section, put them in one directory, and point this at it:
+ *
+ *   ROADWAY_LANDXML_SAMPLE_DIR=/path/to/samples npm test
+ */
+const SAMPLE_DIR = process.env.ROADWAY_LANDXML_SAMPLE_DIR;
+
 const FILES = {
-  allDrives: "T:/lxml-samples/ALL-DRIVES AND ROADS-2.0.xml",
-  olympus: "T:/lxml-samples/Olympus_Subdivision-2.0.xml",
-  topocad: "T:/Civil claude/lxml/Surface%20and%20alignments.xml",
+  allDrives: "ALL-DRIVES AND ROADS-2.0.xml",
+  olympus: "Olympus_Subdivision-2.0.xml",
+  topocad: "Surface and alignments.xml",
 };
-const have = (p: string): boolean => existsSync(p);
+
+/** Resolve a sample by name, or undefined when the corpus is not configured. */
+const sample = (name: string): string | undefined =>
+  SAMPLE_DIR ? join(SAMPLE_DIR, name) : undefined;
+
+const have = (name: string): boolean => {
+  const p = sample(name);
+  return p !== undefined && existsSync(p);
+};
+
+if (!SAMPLE_DIR) {
+  // Said once, out loud. A silent skip is indistinguishable from a pass.
+  console.info(
+    "real-files-appearance: skipping — set ROADWAY_LANDXML_SAMPLE_DIR to the " +
+    "directory holding the LandXML.org samples (see README, 'Try a terrain import'). " +
+    "These are third-party files this repository does not redistribute.",
+  );
+}
 
 /** Everything the assertions need, and nothing that costs megabytes. */
 interface SurfaceFacts {
@@ -99,9 +131,9 @@ function sectionFacts(path: string): SectionFacts {
 }
 
 beforeAll(() => {
-  if (have(FILES.allDrives)) allDrives = surfaceFacts(FILES.allDrives);
-  if (have(FILES.olympus)) olympus = surfaceFacts(FILES.olympus);
-  if (have(FILES.topocad)) topocad = sectionFacts(FILES.topocad);
+  if (have(FILES.allDrives)) allDrives = surfaceFacts(sample(FILES.allDrives)!);
+  if (have(FILES.olympus)) olympus = surfaceFacts(sample(FILES.olympus)!);
+  if (have(FILES.topocad)) topocad = sectionFacts(sample(FILES.topocad)!);
 });
 
 describe.skipIf(!have(FILES.allDrives))("ALL-DRIVES 2.0 — 24 materials, 71 regions", () => {

@@ -1,7 +1,7 @@
 # Roadway Design Compiler
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-517%20passing-brightgreen.svg)](tests)
+[![Tests](https://img.shields.io/badge/tests-525%20passing-brightgreen.svg)](tests)
 [![WebMCP tools](https://img.shields.io/badge/WebMCP-39%20tools-8a2be2.svg)](#what-the-agent-can-do)
 
 **An agent-native roadway design tool. The agent does the engineering. It cannot sign for it.**
@@ -218,6 +218,39 @@ An earlier draft of this section claimed that was true beyond 180° as well. It 
 and the corrected statement is the one above.
 
 
+### Try a terrain import
+
+The samples are **not** in this repository. They are vendor-contributed datasets on
+LandXML.org, and no redistribution grant could be established for them — the sample
+index and the files themselves carry no licence or terms text, and LandXML.org's Open
+Software License covers the SDK and schema, not the datasets. So they are linked, not
+copied.
+
+Download one, then in the [live Studio](https://roadway-design-compiler.gandidhyaneswar.workers.dev)
+use **Import LandXML** (or ask your agent for `import_landxml`), switch to **3D
+corridor**, and press **Fit to ground**.
+
+| sample | bytes | what it shows |
+|---|---:|---|
+| [corridor from CD3-2.0.xml](http://landxml.org/schema/LandXML-2.0/samples/Carlson%20Software/corridor%20from%20CD3-2.0.xml) | 341,260 | **Start here.** The smallest terrain-only file — a surface with no alignment, which is exactly the "ground to put a road on" case |
+| [Olympus_Subdivision-2.0.xml](http://landxml.org/schema/LandXML-2.0/samples/Carlson%20Software/Olympus_Subdivision-2.0.xml) | 941,997 | The richer appearance test: an authored `MaterialTable` with colours, a texture reference and a symbol |
+| [Surface and alignments.xml](http://landxml.org/schema/LandXML-1.1/samples/TopoCAD/Surface%20and%20alignments.xml) | 3,337,024 | Terrain **and** alignments **and** as-designed cross sections, in **metres** — the unit conversion is visible |
+| [ALL-DRIVES AND ROADS-2.0.xml](http://landxml.org/schema/LandXML-2.0/samples/Carlson%20Software/ALL-DRIVES%20AND%20ROADS-2.0.xml) | 1,801,411 | 25,140 triangles, 24 materials across 71 regions |
+| [US68Merge2-2.0.xml](http://landxml.org/schema/LandXML-2.0/samples/Carlson%20Software/US68Merge2-2.0.xml) | 5,620,661 | 69,831 triangles of real highway ground — the size test |
+
+⚠ Those links are **http**, not https: LandXML.org currently resets HTTPS connections.
+Download them yourself in a browser — this app never fetches them for you, and nothing
+here phones home.
+
+To run the sample-backed tests, put the files in one directory and point the suite at it:
+
+```bash
+ROADWAY_LANDXML_SAMPLE_DIR=/path/to/samples npm test
+```
+
+Without it those tests skip and say so. They are the only tests that need anything
+this repository does not contain.
+
 ### The road on the ground
 
 A design surface floating in space is a drawing. Tied to ground it becomes
@@ -348,7 +381,7 @@ gets its own answers. Every verdict reports the basis it used.
 
 ```bash
 npm install
-npm test               # 517 tests
+npm test               # 525 tests (536 with the LandXML samples configured)
 npm run studio         # http://localhost:5173
 npx vite build studio  # production build → studio/dist
 ```

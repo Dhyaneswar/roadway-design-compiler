@@ -17,7 +17,5 @@ CLAUDE.md
 *.png
 !out/*.png
 
-# June-era working notes. Local only -- never published.
-# Holds a personal legal position, founder desk tasks, local data paths and
-# state that contradicts the README. It was tracked for months by accident.
+# Private project notes (not published).
 HANDOFF.md

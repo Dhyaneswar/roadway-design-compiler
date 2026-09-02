@@ -1,7 +1,7 @@
 # S1 Spike Log — LandXML → ORD import
 
 ## Attempt 1 — 2026-06-11 (FAIL, wrong import tool)
-- Evidence: two photos (T:\search WhatsApp images, 5:21 PM).
+- Evidence: two photographs of the ORD session, taken at the time.
 - Used: **Survey workflow → Import → File** on `rdc-s1-sample.xml` → ORD error
   "Error occurred importing File: Land XML File".
 - Diagnosis: Survey's File import expects field books / survey points

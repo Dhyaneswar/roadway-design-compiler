@@ -2,7 +2,8 @@
 
 Source: GDOT Design Plans Library (public), sealed as-built plans completed 04-17-2015.
 Project NH000-0085-02(153), Fulton/DeKalb counties. Design speed 45 mph.
-Local sheet copies: `T:\search\Reference-Data\GDOT-Plans\762380_*.PDF`
+Sheets were downloaded from the library and held locally; they are not redistributed
+here. Fetch them from the URL pattern below.
 URL pattern: `https://mydocs.dot.ga.gov/info/designplans10/DesignPlansLibrary/762380_{sheet:7d}_AB.PDF`
 
 ## Extracted printed values (alignment "℄ RAMP STRIPING", SR 400 SB → I-85 NB)

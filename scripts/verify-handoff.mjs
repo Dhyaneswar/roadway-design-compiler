@@ -10,9 +10,13 @@ import { mkdtempSync, rmSync, readFileSync, existsSync, statSync } from "node:fs
 import { tmpdir } from "node:os";
 import { join, extname, normalize } from "node:path";
 import { createServer } from "node:http";
+import { fileURLToPath } from "node:url";
 
 const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
-const DIST = process.argv[2] || "T:\\search - Copy\\roadway\\studio\\dist";
+// Repo-relative, resolved from this file: the default used to be one
+// developer's absolute path, which is useless to anybody who clones this.
+const DIST = process.argv[2]
+  || fileURLToPath(new URL("../studio/dist", import.meta.url));
 const WEB = Number(process.argv[3] || 8220);
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8", ".json": "application/json" };

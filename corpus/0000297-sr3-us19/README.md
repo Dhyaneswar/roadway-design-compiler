@@ -3,8 +3,8 @@
 Source: GDOT GeoPI public document repository, via the public download handlers
 (`PWDocumentDownloadHandler.ashx` per-doc; `EnterpriseDownloadHandler.ashx` bulk).
 FINAL plans dated 09/06/2018, NHS00-0000-00(297), 779 sheets, designer: Parsons.
-Local sheets: `T:\search\Reference-Data\GDOT-Plans\0000297\sheets\` (499 unique;
-original bulk zip retained alongside).
+Sheets were downloaded from that repository and held locally (499 unique, plus the
+original bulk zip). They are not redistributed here; the source above is public.
 
 Founder's domain note (2026-06-11): 2018 finals remain representative for geometry
 and most plan production; only title-block-level formatting has changed since.
