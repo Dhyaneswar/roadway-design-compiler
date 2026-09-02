@@ -65,11 +65,23 @@ try {
   sock = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise((r, j) => { sock.addEventListener("open", r, {once:true}); sock.addEventListener("error", j, {once:true}); });
 
-  console.log("\n0:00-0:20  the app, a road on screen");
+  /**
+   * ⛔ OPEN ON THE AGENT WORKING, not on the app sitting still.
+   *
+   * This used to spend 0:00-0:20 on a static Design view before anything
+   * happened. The organizers' announcement asks for the functioning project in
+   * the first 10-15 SECONDS, and twenty seconds of a screenshot spends the only
+   * part of the video everyone watches on the least interesting thing in it.
+   *
+   * The road is on screen behind the very first tool call, so the establishing
+   * shot still happens -- it just happens underneath the demo instead of before
+   * it. Beat 1 is a ~3 second cutaway, not a title card.
+   */
+  console.log("\n0:00-0:03  cold open — the road is already on screen (cutaway, do NOT linger)");
   console.log("   banner:", (await ev("(document.getElementById('agentStatus')||{}).textContent||''")).trim().slice(0, 70));
-  await beat(1, "opening shot — Design view, road and tables visible");
+  await beat(1, "3s cutaway only — road and tables visible behind the first tool call");
 
-  console.log("\n0:20-0:45  agent: check this against 70 mph");
+  console.log("\n0:03-0:15  FIRST THING THE VIEWER SEES: the agent judging the road at 70 mph");
   const c1 = JSON.parse(await ev(CALL("check_design_criteria", { designSpeedMph: 70, emax: 0.06 })));
   console.log(`   ${c1.checked} checks, ${c1.failed} failed`);
   const worst = (c1.verdicts || []).find((v) => v.status === "fail");
@@ -77,7 +89,7 @@ try {
   console.log("   basis   :", worst?.basis);
   await beat(2, "criteria failure on screen — the number AND the equation");
 
-  console.log("\n0:45-1:15  agent widens the curve to the radius the verdict named");
+  console.log("\n0:15-0:40  agent widens the curve to the radius the verdict named");
   const target = Math.ceil((worst?.required ?? 2100) / 50) * 50;
   const widen = JSON.parse(await ev(CALL("set_horizontal_element", { index: 2, radiusFt: target, commit: true })));
   console.log(`   set curve 1 radius -> ${target} ft :`, widen.committed ? "committed" : "REFUSED");
@@ -85,7 +97,7 @@ try {
   console.log(`   re-check: ${c1.failed} failures -> ${c2.failed}`);
   await beat(3, "re-check — failure count drops");
 
-  console.log("\n1:15-1:45  agent: bank the curves for 70 mph");
+  console.log("\n0:40-1:05  agent: bank the curves for 70 mph");
   const before = JSON.parse(await ev(CALL("read_cross_section", { station: 2500 })));
   const edge = (x, side) => {
     const a = x?.[side]; if (!Array.isArray(a) || !a.length) return "n/a";
@@ -104,10 +116,10 @@ try {
   await ev(click3d); await sleep(3000);
   await ev(`(() => { const s=document.getElementById('exag'); if(s){ s.value='10'; s.dispatchEvent(new Event('change')); } })()`);
   await sleep(1800);
-  await beat(5, "3D corridor at 10x exaggeration — the road banked");
+  await beat(5, "1:05-1:15  3D corridor at 10x exaggeration — the road banked");
   await ev(clickDesign); await sleep(1200);
 
-  console.log("\n1:45-2:15  agent: export the LandXML  ->  REFUSED");
+  console.log("\n1:15-1:45  agent: export the LandXML  ->  REFUSED");
   const blocked = JSON.parse(await ev(CALL("export_landxml", {})));
   console.log("   ", blocked.refused ? blocked.code : "OK (UNEXPECTED)");
   console.log("   ", (blocked.detail || "").slice(0, 130));
@@ -116,14 +128,14 @@ try {
     names.filter((n) => /(^|_)(confirm|approve|seal|sign|accept)(_|$)/i.test(n)).length === 0 ? "NONE" : "SOME");
   await beat(6, "the refusal + the yellow confirmation banner — THE MONEY SHOT");
 
-  console.log("\n2:15-2:40  the engineer confirms, and the export succeeds");
+  console.log("\n1:45-2:05  the engineer confirms, and the export succeeds");
   await ev(`(() => { const b=document.querySelector('#agentPending .pending-confirm'); if(b) b.click(); })()`);
   await sleep(1000);
   const okxml = JSON.parse(await ev(CALL("export_landxml", {})));
   console.log("   export:", okxml.refused ? "still refused" : `OK, ${okxml.lengthBytes} bytes of LandXML`);
   await beat(7, "export succeeds, banner gone");
 
-  console.log("\n2:40-2:50  every one of those was a WebMCP tool call");
+  console.log("\n2:05-2:20  every one of those was a WebMCP tool call");
   await ev(`(() => { const d=document.getElementById('agentLog'); if(d) d.open = true; })()`);
   await sleep(600);
   console.log("   ", (await ev("(document.querySelector('#agentLog summary')||{}).textContent||''")).trim());

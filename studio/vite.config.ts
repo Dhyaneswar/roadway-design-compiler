@@ -41,4 +41,22 @@ export default defineConfig({
     __BUILD_COMMIT__: JSON.stringify(dirty ? `${commit}-dirty` : commit),
     __BUILD_AT__: JSON.stringify(new Date().toISOString()),
   },
+  build: {
+    /**
+     * Raised only AFTER the initial bundle was actually made small.
+     *
+     * The entry chunk was 772 KB because `studio/main.ts` imported the three.js
+     * viewer statically, so every first paint -- and every agent that only ever
+     * reads the design -- downloaded a 3D renderer it might never open.
+     * `activate3d()` now imports it dynamically, which is what the 500 KB
+     * default was warning about: entry 222 KB, renderer 550 KB fetched on the
+     * first click of the 3D tab.
+     *
+     * ⚠ The remaining chunk over the default is three.js itself, and it is
+     * DEFERRED. The threshold is lifted to stop a warning that no longer
+     * describes a problem -- not to silence one. If the entry chunk ever grows
+     * past this, that is a real regression and should fail loudly.
+     */
+    chunkSizeWarningLimit: 600,
+  },
 });

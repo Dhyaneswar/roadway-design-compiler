@@ -1,7 +1,7 @@
 # Roadway Design Compiler
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-485%20passing-brightgreen.svg)](tests)
+[![Tests](https://img.shields.io/badge/tests-517%20passing-brightgreen.svg)](tests)
 [![WebMCP tools](https://img.shields.io/badge/WebMCP-39%20tools-8a2be2.svg)](#what-the-agent-can-do)
 
 **An agent-native roadway design tool. The agent does the engineering. It cannot sign for it.**
@@ -41,8 +41,8 @@ date. At that point the project had no agent surface of any kind.
 
 **The evidence is the commit history.** The first published commit (30 August) bundles
 the pre-existing modules together with the first WebMCP layer; every commit after it is
-in-window work, visible one at a time. 49 of the repository's 112 files were added after
-that first commit, among them 18 test files and 17 driver scripts, 12 of which are
+in-window work, visible one at a time. 56 of the repository's 119 files were added after
+that first commit, among them 21 test files and 19 driver scripts, 14 of which are
 end-to-end verification harnesses that drive the built app over CDP exactly as an agent
 would.
 
@@ -348,7 +348,7 @@ gets its own answers. Every verdict reports the basis it used.
 
 ```bash
 npm install
-npm test               # 485 tests
+npm test               # 517 tests
 npm run studio         # http://localhost:5173
 npx vite build studio  # production build → studio/dist
 ```

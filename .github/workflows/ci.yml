@@ -1,0 +1,44 @@
+# Every push and pull request runs the same three gates used before each deploy.
+#
+# ⚠ Deliberately NOT the end-to-end harnesses in scripts/verify-*.mjs. Those drive
+# a real Chrome over CDP against a built bundle, and a headless runner without a
+# browser would either skip them silently or fail for a reason unrelated to the
+# code. A green badge that means less than it appears to is worse than no badge:
+# what this proves is the unit suite, the types, and that the studio builds.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      # `npm ci` and not `npm install`: the lockfile is the thing under test.
+      - run: npm ci
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Types
+        run: npm run typecheck
+
+      - name: Studio build
+        run: npm run studio:build
+
+      # Dev-chain advisories are still worth surfacing; they do not gate the run,
+      # because a new advisory published upstream overnight is not a regression
+      # in this repository and should not turn the badge red on its own.
+      - name: Audit (advisory only)
+        run: npm audit --audit-level=high
+        continue-on-error: true

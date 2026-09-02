@@ -2111,7 +2111,17 @@ export function buildTools(host: StudioHost): WebMcpTool[] {
       index: S.int("1-based index of the element to change."),
       lengthFt: S.num("New tangent length in feet."),
       radiusFt: S.num("New curve radius in feet."),
-      deltaDeg: S.num("New curve delta in degrees."),
+      // ⛔ The SAME bound as add_horizontal_element, stated here too.
+      //
+      // The kernel refuses 180 either way, but an agent reading only this
+      // description had no reason to expect that, so it learned the constraint
+      // by being refused. A bound enforced in one place and documented in
+      // another is a bound the caller finds out about the expensive way.
+      deltaDeg: S.num(
+        "New curve delta in degrees. Greater than 0 and LESS THAN 180 -- at exactly 180 "
+          + "the two tangents are parallel, never meet, and the tangent and external "
+          + "distances are undefined.",
+      ),
       direction: S.enum(["left", "right"], "New turn direction."),
       commit: S.commit,
     }, ["index"]),

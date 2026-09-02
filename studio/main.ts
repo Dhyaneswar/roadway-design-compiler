@@ -20,7 +20,15 @@ import { TinSampler, sampleGround, summariseEarthwork, type Tin } from "../src/k
 import { transitionFor } from "../src/kernel/superelevation";
 import { sampleAlignment, sampleProfile } from "../src/kernel/sample";
 import { azimuthToBearing, degreesToDms } from "../src/util/angle";
-import { createViewer, type LegendEntry, type Viewer3D } from "./viewer3d";
+/**
+ * ⛔ TYPE-ONLY. createViewer is loaded on demand, further down.
+ *
+ * three.js and OrbitControls are ~620 KB of the bundle, and the Design view --
+ * the whole form, the kernel, all 39 WebMCP tools -- needs none of it. A static
+ * import made every first paint, and every agent that only ever reads the
+ * design, pay for a 3D renderer it may never open.
+ */
+import type { LegendEntry, Viewer3D } from "./viewer3d";
 import type { RoadDesign, SuperelevationSpec } from "../src/schema/road-design";
 import type { RoadsideItem } from "../src/schema/roadside";
 import { CRS_ZONES, projectCrsFor, type CrsSelection } from "../src/studio/crs";
@@ -1389,25 +1397,44 @@ const setLegend = (entries: LegendEntry[]): void => {
   }
 };
 
-function activate3d(): void {
+/** Guards against a second click landing while the chunk is still in flight. */
+let viewer3dLoading: Promise<void> | undefined;
+
+async function activate3d(): Promise<void> {
   if (!viewer && !viewer3dFailed) {
-    try {
-      viewer = createViewer($("viewer3d"), setReadout, setLegend);
-    } catch (e) {
-      viewer3dFailed = true;
-      $("viewer3d").innerHTML =
-        `<div style="padding:16px; color:var(--dim); font-size:12.5px;">` +
-        `3D view unavailable (${(e as Error).message}). Usually this means WebGL ` +
-        `is off — check browser hardware acceleration. The Design view is unaffected.</div>`;
-    }
-    if (viewer && lastDesign) {
-      try {
-        viewer.update(lastDesign);
-      } catch (e) {
-        setReadout(`corridor unavailable: ${(e as Error).message}`);
-      }
+    if (viewer3dLoading) {
+      await viewer3dLoading;
+    } else {
+      viewer3dLoading = (async () => {
+        try {
+          const { createViewer } = await import("./viewer3d");
+          viewer = createViewer($("viewer3d"), setReadout, setLegend);
+        } catch (e) {
+          viewer3dFailed = true;
+          $("viewer3d").innerHTML =
+            `<div style="padding:16px; color:var(--dim); font-size:12.5px;">` +
+            `3D view unavailable (${(e as Error).message}). Usually this means WebGL ` +
+            `is off — check browser hardware acceleration. The Design view is unaffected.</div>`;
+        }
+      })();
+      await viewer3dLoading;
     }
   }
+  if (viewer && lastDesign) {
+    try {
+      viewer.update(lastDesign);
+    } catch (e) {
+      setReadout(`corridor unavailable: ${(e as Error).message}`);
+    }
+  }
+  // ⛔ Pushed HERE, not by the caller.
+  //
+  // These used to run on the line after activate3d(), which was safe only while
+  // it was synchronous. Now that the renderer arrives over the network they must
+  // wait for it, and the only place that knows it has arrived is this function.
+  viewer?.setTerrain(terrain);
+  viewer?.setDesignSections(designSections);
+  viewer?.setPlanFeatures(planFeatures);
   viewer?.setActive(true);
 }
 
@@ -1416,7 +1443,8 @@ function switchView(to3d: boolean): void {
   $("view3d").style.display = to3d ? "flex" : "none";
   $("btnViewDesign").classList.toggle("active", !to3d);
   $("btnView3d").classList.toggle("active", to3d);
-  if (to3d) { activate3d(); viewer?.setTerrain(terrain); viewer?.setDesignSections(designSections); viewer?.setPlanFeatures(planFeatures); }
+  // void: the tab swaps immediately and the renderer fills in when it lands.
+  if (to3d) void activate3d();
   else viewer?.setActive(false);
 }
 $("btnViewDesign").addEventListener("click", () => switchView(false));
